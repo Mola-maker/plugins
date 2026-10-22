@@ -4,11 +4,12 @@
 // agent copies no file bytes; a checkpoint stores only what changed.
 // Arguments are JSON Schema, so the package needs no dependency.
 //
-// Backends: the real LayerFS through its JavaScript SDK — off by
-// default, on only when the user opts in (the plugin's "native"
-// option, or MAGPIE_LAYERFS_NATIVE=1) with LAYERFS_SDK_PATH set, and
-// always behind a child process — otherwise a local content-addressed
-// store with the same model. See layerfs.mjs and the README.
+// Backend: a local content-addressed store implementing the LayerFS
+// model. This package is sim-only — the native backend (the real
+// LayerFS through its SDK) is developed in the standalone repo
+// (Mola-maker/magpie-layerfs) and returns in a follow-up PR once
+// @layerfs/sdk is published to npm with a version to pin. See
+// layerfs.mjs and the README.
 import { checkBranch, checkInnerPath, checkProject, checkSourceDir, createBackend } from "./layerfs.mjs"
 
 const str = (v, name) => {
@@ -19,25 +20,23 @@ const opt = (v, name, dflt) => (v === undefined || v === "" ? dflt : str(v, name
 
 // The plugin's options: magpie hands a plugin its options (the
 // magpie.options defaults in package.json, as the user set them) as
-// the plugin function's second argument. Two of them are switches
-// only the user may flip, because both widen what these tools can do
-// with the host's rights: "exec" (run shell commands) and "native"
-// (run the LayerFS SDK, in a child process). The MAGPIE_LAYERFS_EXEC /
-// MAGPIE_LAYERFS_NATIVE environment variables are the same switches
-// for hosts that do not pass options.
+// the plugin function's second argument. One of them is a switch
+// only the user may flip, because it widens what these tools can do
+// with the host's rights: "exec" (run shell commands). The
+// MAGPIE_LAYERFS_EXEC environment variable is the same switch for
+// hosts that do not pass options.
 export const LayerfsTools = async (ctx = {}, options = {}) => {
   let backendPromise
   const backend = () => (backendPromise ??= createBackend(process.env, options))
   const execEnabled = () => options?.exec === true || process.env.MAGPIE_LAYERFS_EXEC === "1"
-  const call = async (fn, project) => {
+  // A call touches only the state its own operation needs. Nothing
+  // here maintains a recorded trajectory file: an earlier version
+  // refreshed one in the store after every call, at a cost that grew
+  // with the project's history, for a file the page cannot read — the
+  // trajectory is built on demand by the backend when asked (0.7.1).
+  const call = async (fn) => {
     const b = await backend()
-    const out = await fn(b)
-    // Keep the recorded trajectory current — in the store, scoped to
-    // the project this call touched, never in the package directory
-    // (the page's bundled file is a sample, not a recording surface).
-    // A failure here must never fail the tool call itself.
-    try { await b.refreshTrajectoryFile?.(project) } catch { /* the picture is a bonus, never a dependency */ }
-    return out
+    return fn(b)
   }
 
   return {
@@ -48,7 +47,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           "The first provision of a project imports the source directory the caller passes — source is required, there is no default — as its first checkpoint; " +
           "later provisions of the same branch answer the same path without copying the tree again (source is then ignored). " +
           "Pass the directory the user chose for this project: magpie's config directory, credential stores (.ssh, .aws, .gnupg), the home directory and the plugin's own store are refused as sources, " +
-          "and secret-shaped files in the tree (.env*, private keys, .git internals) never enter the store — the sim backend skips them on import and reports how many, the native backend refuses an import that holds them. " +
+          "and secret-shaped files in the tree (.env*, private keys, .git internals) never enter the store — the import skips them and reports how many. " +
           "Work in the returned path, then save progress with the checkpoint tool. " +
           "Only the returned path is persistent — work anywhere else, including the host's /tmp, is outside LayerFS management; " +
           "the workspace also carries .tmp/ and .cache/ scratch directories (exec points TMPDIR and XDG_CACHE_HOME at them), which checkpoint and publish never capture.",
@@ -70,13 +69,14 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           if (args.source === undefined) throw new Error(
             "source is required: the directory to import when the project is first created — pass the directory the user chose for this project")
           const source = checkSourceDir(str(args.source, "source"), { configDir: ctx.directory })
-          return call((b) => b.provision(project, branch, source), project)
+          return call((b) => b.provision(project, branch, source))
         },
       },
       checkpoint: {
         description:
-          "Saves the workspace's current state as a deduplicated checkpoint on its branch: only blobs the store has not seen are written, " +
-          "so keeping the full history of a large tree costs little more than the changes themselves. " +
+          "Saves the workspace's current state as a deduplicated checkpoint on its branch: only blobs the store has not seen are written. " +
+          "The real cost model: the changed blobs, plus one commit record per checkpoint holding the tree's full manifest — " +
+          "for a wide tree the manifests are a real part of the store's bytes, and the storage accounting counts them. " +
           "Answers the commit id and the added / modified / deleted counts with the new-bytes and saved-bytes accounting.",
         args: {
           type: "object",
@@ -90,7 +90,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
         async execute(args) {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(opt(args.branch, "branch", "main"))
-          return call((b) => b.checkpoint(project, branch, opt(args.message, "message", "")), project)
+          return call((b) => b.checkpoint(project, branch, opt(args.message, "message", "")))
         },
       },
       fork: {
@@ -110,7 +110,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(str(args.branch, "branch"))
           const from = checkBranch(opt(args.from, "from", "main"))
-          return call((b) => b.fork(project, branch, from), project)
+          return call((b) => b.fork(project, branch, from))
         },
       },
       publish: {
@@ -130,7 +130,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
         async execute(args) {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(str(args.branch, "branch"))
-          return call((b) => b.publish(project, branch, { force: args.force === true }), project)
+          return call((b) => b.publish(project, branch, { force: args.force === true }))
         },
       },
       exec: {
@@ -162,7 +162,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           const command = str(args.command, "command")
           const message = args.message === undefined ? "" : str(args.message, "message")
           const timeoutMs = args.timeoutMs === undefined ? 50000 : Number(args.timeoutMs) || 50000
-          return call((b) => b.exec(project, branch, command, message, timeoutMs), project)
+          return call((b) => b.exec(project, branch, command, message, timeoutMs))
         },
       },
       history: {
@@ -182,7 +182,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(opt(args.branch, "branch", "main"))
           const limit = args.limit === undefined ? 20 : Math.max(1, Math.min(200, Number(args.limit) || 20))
-          return call((b) => b.history(project, branch, limit), project)
+          return call((b) => b.history(project, branch, limit))
         },
       },
       resolve: {
@@ -203,12 +203,12 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(opt(args.branch, "branch", "main"))
           const inner = args.path === undefined || args.path === "" ? "" : checkInnerPath(str(args.path, "path"))
-          return call((b) => b.resolve(project, branch, inner), project)
+          return call((b) => b.resolve(project, branch, inner))
         },
       },
       status: {
         description:
-          "Reports the LayerFS backend in use (native or sim), the projects and branches it holds, and the storage accounting: " +
+          "Reports the LayerFS backend in use (sim in this package), the projects and branches it holds, and the storage accounting: " +
           "the logical bytes of every checkpoint ever taken against the bytes the deduplicated store actually occupies, and the ratio between them.",
         args: { type: "object", properties: {} },
         async execute() {

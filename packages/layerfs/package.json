@@ -6,7 +6,6 @@
   "files": [
     "index.mjs",
     "layerfs.mjs",
-    "native-worker.mjs",
     "page",
     "README.md"
   ],
@@ -25,8 +24,7 @@
   "license": "MIT",
   "magpie": {
     "options": {
-      "exec": false,
-      "native": false
+      "exec": false
     },
     "page": {
       "file": "page/index.html",
@@ -43,8 +41,9 @@
   "name": "@magpie-community/tools-layerfs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mola-maker/magpie-layerfs.git"
+    "url": "git+https://github.com/magpie-community/plugins.git",
+    "directory": "packages/layerfs"
   },
   "type": "module",
-  "version": "0.7.0"
+  "version": "0.7.1"
 }
