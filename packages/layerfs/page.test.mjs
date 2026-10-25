@@ -24,7 +24,7 @@ test("the package declares the page magpie shows", () => {
   const html = read("index.html")
   expect(html).toContain("_magpie/bridge.js") // the host serves the bridge beside every page
   expect(html).toContain('src="trajectory.js"')
-  expect(html).toContain('src="trajectory-live.js"') // the tools keep the live trajectory beside the sample
+  expect(html).not.toContain("trajectory-live.js") // no runtime live file: the tools never write into the install folder
   // the page sandbox forbids inline scripts and any fetch; the only
   // data script is the bundled sample trajectory shipped with the page
   expect(html).not.toMatch(/<script>(?!\s*src)/)

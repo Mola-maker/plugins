@@ -13,8 +13,9 @@
 // a labeled sample from the benchmark run). A magpie page cannot read
 // plugin-private data: the bridge's reads are a fixed host list
 // (usage:summary, providers:list), and the sandbox allows no fetch.
-// The live recording the tools keep lives in the store as
-// trajectory.json, next to the store's own data.
+// The tools therefore never write a live file into the plugin's
+// install folder; the live trajectory stays available through the
+// tools (history, status) and backend.trajectory().
 (async () => {
   const V = globalThis.LayerfsView;
   const $ = (id) => document.getElementById(id);

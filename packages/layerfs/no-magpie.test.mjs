@@ -31,7 +31,6 @@ test("the errors a call answers name neither magpie nor its settings", async () 
   process.env.MAGPIE_LAYERFS_HOME = mk("lfs-home-")
   process.env.MAGPIE_LAYERFS_BACKEND = "sim"
   delete process.env.MAGPIE_LAYERFS_EXEC
-  delete process.env.MAGPIE_LAYERFS_NATIVE
   const cfg = mk("app-config-")
   const { tool } = await LayerfsTools({ directory: cfg }, { exec: false })
   const call = (name, args) => tool[name].execute(args, { agent: "test", abort: AbortSignal.timeout(5000) })

@@ -4,20 +4,18 @@
 // agent copies no file bytes; a checkpoint stores only what changed.
 // Arguments are JSON Schema, so the package needs no dependency.
 //
-// The page's data channel: magpie serves a plugin page's files from the
-// plugin's folder as they sit on disk, so after the calls that change the
-// store the tools rewrite page/trajectory-live.js from backend.trajectory()
-// — the page's real commits, branches, storage and dedup accounting, with
-// the real calling agent on each. See the README's page section.
+// The page shows the trajectory bundled with the package (page/trajectory.js,
+// a labeled sample): the tools never write into the plugin's install
+// folder, so no runtime live file exists there — an update replaces
+// that folder, two hosts sharing one install would race on the file,
+// and an install can be read-only. The live trajectory stays available
+// through the tools (history, status) and through backend.trajectory().
+// See the README's page section.
 //
-// Backends: the real LayerFS through its JavaScript SDK — off by
-// default, on only when the user opts in (the plugin's "native"
-// option, or MAGPIE_LAYERFS_NATIVE=1) with LAYERFS_SDK_PATH set, and
-// always behind a child process — otherwise a local content-addressed
-// store with the same model. See layerfs.mjs and the README.
-import { mkdirSync, renameSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+// Backend: a local content-addressed store with the LayerFS model, in
+// layerfs.mjs. The native backend (the real LayerFS SDK) is not shipped
+// in this registry package — the SDK is still not published to npm —
+// and returns once the plugin can pin it as a dependency. See the README.
 import { checkBranch, checkInnerPath, checkProject, checkSourceDir, createBackend } from "./layerfs.mjs"
 
 const str = (v, name) => {
@@ -36,22 +34,6 @@ const callingAgent = (ctx) => {
   return typeof a === "string" && a.trim() ? a.trim().slice(0, 40) : ""
 }
 
-// ---- the page's live trajectory ------------------------------------------
-// magpie serves a page's files from the plugin's folder per request, as they
-// sit on disk, so a file the tools keep current IS a data channel: after the
-// calls that change the store, backend.trajectory() is rebuilt and written
-// to page/trajectory-live.js — tmp-then-renamed, so the page never loads a
-// half-written file. The page loads it after the bundled sample and prefers
-// it; an empty store writes an empty live file, and the page shows its
-// honest empty state instead of the demo. The write is debounced and off
-// the calls' critical path, errors swallowed — the page keeps its last
-// file, the tool calls are untouched. MAGPIE_LAYERFS_PAGE_DIR moves the
-// folder (the tests point it at a scratch dir).
-const LIVE = "trajectory-live.js"
-const LIVE_DEBOUNCE_MS = 1200
-const pageDir = () =>
-  process.env.MAGPIE_LAYERFS_PAGE_DIR || join(dirname(fileURLToPath(import.meta.url)), "page")
-
 export const LayerfsTools = async (ctx = {}, options = {}) => {
   let backendPromise
   const backend = () => (backendPromise ??= createBackend(process.env, options))
@@ -62,42 +44,6 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
     const b = await backend()
     return fn(b)
   }
-  // The live trajectory, per plugin instance: a trailing debounce coalesces
-  // a burst of parallel agents' calls into one rebuild-and-write. The file
-  // persists in the page folder, so it is already current when magpie (and
-  // the host) restarts — there is deliberately no refresh at plugin start:
-  // it would create the store (or touch the page folder) from a bare
-  // `LayerfsTools({})`, and nothing has changed that the last write missed.
-  let liveTimer = null, liveInFlight = false, livePending = false
-  const writeLive = async (b) => {
-    const dir = pageDir()
-    const data = await b.trajectory()
-    mkdirSync(dir, { recursive: true })
-    const tmp = join(dir, `${LIVE}.tmp`)
-    writeFileSync(tmp, `globalThis.LayerfsTrajectory = ${JSON.stringify(data)};\n`)
-    renameSync(tmp, join(dir, LIVE))
-  }
-  const scheduleLive = (b) => {
-    livePending = true
-    if (liveTimer || liveInFlight) return
-    liveTimer = setTimeout(() => {
-      liveTimer = null
-      liveInFlight = true
-      writeLive(b)
-        .catch(() => { /* the page keeps its last file; the tools are untouched */ })
-        .finally(() => {
-          liveInFlight = false
-          if (livePending) { livePending = false; scheduleLive(b) }
-        })
-    }, LIVE_DEBOUNCE_MS)
-  }
-  // A mutating call refreshes the page's live trajectory after it lands.
-  const mutate = async (fn) => {
-    const b = await backend()
-    const out = await fn(b)
-    try { scheduleLive(b) } catch { /* never on the tool call's path */ }
-    return out
-  }
 
   return {
     tool: {
@@ -107,7 +53,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           "The first provision of a project imports the source directory the caller passes — source is required, there is no default — as its first checkpoint; " +
           "later provisions of the same branch answer the same path without copying the tree again (source is then ignored). " +
           "Pass the directory the user chose for this project: the app's config directory, credential stores (.ssh, .aws, .gnupg), the home directory and the plugin's own store are refused as sources, " +
-          "and secret-shaped files in the tree (.env*, private keys, .git internals) never enter the store — the sim backend skips them on import and reports how many, the native backend refuses an import that holds them. " +
+          "and secret-shaped files in the tree (.env*, private keys, .git internals) never enter the store — the sim backend skips them on import and reports how many. " +
           "Work in the returned path, then save progress with the checkpoint tool. " +
           "Only the returned path is persistent — work anywhere else, including the host's /tmp, is outside LayerFS management; " +
           "the workspace also carries .tmp/ and .cache/ scratch directories (exec points TMPDIR and XDG_CACHE_HOME at them), which checkpoint and publish never capture.",
@@ -129,7 +75,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           if (args.source === undefined) throw new Error(
             "source is required: the directory to import when the project is first created — pass the directory the user chose for this project")
           const source = checkSourceDir(str(args.source, "source"), { configDir: ctx.directory })
-          return mutate((b) => b.provision(project, branch, source, callingAgent(callCtx)))
+          return call((b) => b.provision(project, branch, source, callingAgent(callCtx)))
         },
       },
       checkpoint: {
@@ -150,7 +96,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
         async execute(args, callCtx) {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(opt(args.branch, "branch", "main"))
-          return mutate((b) => b.checkpoint(project, branch, opt(args.message, "message", ""), callingAgent(callCtx)))
+          return call((b) => b.checkpoint(project, branch, opt(args.message, "message", ""), callingAgent(callCtx)))
         },
       },
       fork: {
@@ -170,7 +116,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(str(args.branch, "branch"))
           const from = checkBranch(opt(args.from, "from", "main"))
-          return mutate((b) => b.fork(project, branch, from, callingAgent(callCtx)))
+          return call((b) => b.fork(project, branch, from, callingAgent(callCtx)))
         },
       },
       publish: {
@@ -190,7 +136,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
         async execute(args, callCtx) {
           const project = checkProject(str(args.project, "project"))
           const branch = checkBranch(str(args.branch, "branch"))
-          return mutate((b) => b.publish(project, branch, { force: args.force === true, agent: callingAgent(callCtx) }))
+          return call((b) => b.publish(project, branch, { force: args.force === true, agent: callingAgent(callCtx) }))
         },
       },
       exec: {
@@ -222,7 +168,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
           const command = str(args.command, "command")
           const message = args.message === undefined ? "" : str(args.message, "message")
           const timeoutMs = args.timeoutMs === undefined ? 50000 : Number(args.timeoutMs) || 50000
-          return mutate((b) => b.exec(project, branch, command, message, timeoutMs, callingAgent(callCtx)))
+          return call((b) => b.exec(project, branch, command, message, timeoutMs, callingAgent(callCtx)))
         },
       },
       history: {
@@ -268,7 +214,7 @@ export const LayerfsTools = async (ctx = {}, options = {}) => {
       },
       status: {
         description:
-          "Reports the LayerFS backend in use (native or sim), the projects and branches it holds, and the storage accounting: " +
+          "Reports the LayerFS backend in use, the projects and branches it holds, and the storage accounting: " +
           "the logical bytes of every checkpoint ever taken against the bytes the deduplicated store actually occupies, and the ratio between them.",
         args: { type: "object", properties: {} },
         async execute() {
