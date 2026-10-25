@@ -377,19 +377,26 @@ test("item 8 + r2 item 3: no trajectory file in the store, and no tool call writ
   expect(traj.totals.logicalBytes).toBeGreaterThan(0)
 })
 
-test("trajectory() is incremental: an unchanged store reuses the last walk, a new checkpoint refreshes it", async () => {
+test("trajectory() rebuilds read only new commits: a second rebuild reads none", async () => {
   const { call, home } = await simTools()
   await call("provision", { project: "website" })
   const b = new SimBackend(home)
-  const t1 = await b.trajectory()
-  const t2 = await b.trajectory()
-  expect({ ...t2, generatedAt: t1.generatedAt }).toEqual(t1) // same walk, fresh stamp
+  await b.trajectory() // first build parses every record once
+  // guard: summaries are cached per project/id, so a rebuild with
+  // nothing new must not touch the store's records again
+  let reads = 0
+  const orig = b.readCommit.bind(b)
+  b.readCommit = (...a) => { reads++; return orig(...a) }
+  await b.trajectory()
+  expect(reads).toBe(0)
   await call("checkpoint", { project: "website", message: "second" })
-  const t3 = await b.trajectory()
-  const main = t3.projects.find((p) => p.name === "website").branches.find((x) => x.name === "main")
+  reads = 0
+  const t = await b.trajectory()
+  const main = t.projects.find((p) => p.name === "website").branches.find((x) => x.name === "main")
   expect(main.commits).toHaveLength(2)
   expect(main.commits[0].message).toMatch(/^Import /)
   expect(main.commits.at(-1).message).toBe("second")
+  expect(reads).toBe(1) // only the new checkpoint's record
 })
 
 test("calls record the real calling agent on commits and events; the trajectory carries it", async () => {

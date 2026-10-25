@@ -212,9 +212,13 @@ longer write `page/trajectory-live.js` at runtime and the page is
 back to the bundled sample (the 0.7.1 position — a magpie page
 cannot read plugin-private data, and the bridge's reads are a
 fixed host list). The live trajectory stays available through the
-tools and through `backend.trajectory()`, which is now
-incremental: an unchanged store reuses the last walk instead of
-re-walking every branch's chain after each burst of calls.
+tools and through `backend.trajectory()`, which now caches every
+commit's summary (everything but the manifest, which it never
+uses) per project/id: a rebuild reads only commits it has never
+seen, and a rebuild with nothing new reads no records at all (a
+test counts the reads to pin that). Between branches the walk
+yields, so even a first build over a large store never holds the
+shared plugin host's event loop for its whole duration.
 
 ## Changes in 0.8.0
 

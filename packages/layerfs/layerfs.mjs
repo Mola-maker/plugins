@@ -329,6 +329,10 @@ export class SimBackend {
     this.objectsDir = join(this.root, "store", "objects")
     this.projectsDir = join(this.root, "projects")
     this.workspacesDir = join(this.root, "workspaces")
+    // Commit summaries for trajectory(): records never change once
+    // written, so a summary (everything but the manifest) is cached
+    // per project/id for the life of this backend
+    this._commitSummary = new Map()
     for (const d of [this.root, this.objectsDir, this.projectsDir, this.workspacesDir]) mkdirPrivate(d)
     // Seed the byte accounting before anything writes, so the bumps
     // below stay exact (a walk taken after a write would count it twice)
@@ -420,6 +424,26 @@ export class SimBackend {
   projectExists(project) { return existsSync(join(this.projectDir(project), "project.json")) }
   commitPath(project, id) { return join(this.projectDir(project), "commits", `${id}.json`) }
   readCommit(project, id) { return JSON.parse(readFileSync(this.commitPath(project, id), "utf8")) }
+  // A commit's summary: everything trajectory() shows, without the
+  // manifest — the big part, which trajectory never uses. The walk
+  // below reads each record once per backend lifetime; later rebuilds
+  // hit this map and touch no files, so a host-shared plugin host is
+  // stalled only by genuinely new commits, never by re-reading history.
+  readCommitSummary(project, id) {
+    const key = `${project}/${id}`
+    let s = this._commitSummary.get(key)
+    if (!s) {
+      const c = this.readCommit(project, id)
+      s = {
+        id: c.id, parent: c.parent, branch: c.branch, message: c.message, time: c.time,
+        files: c.files, logicalBytes: c.logicalBytes, newBytes: c.newBytes,
+        delta: c.delta ?? { added: 0, modified: 0, deleted: 0 },
+        ...(c.agent ? { agent: c.agent } : {}),
+      }
+      this._commitSummary.set(key, s)
+    }
+    return s
+  }
   writeCommit(project, commit) {
     mkdirPrivate(join(this.projectDir(project), "commits"))
     writeJson(this.commitPath(project, commit.id), commit, true)
@@ -631,7 +655,13 @@ export class SimBackend {
   }
 
   // One project's slice of the recorded trajectory, oldest first per
-  // branch. Commits carry their delta and byte accounting.
+  // branch. Commits carry their delta and byte accounting. The walk
+  // reads through readCommitSummary, so a forked branch does not
+  // re-read main's history: every record is parsed once per backend
+  // lifetime, and a rebuild after a new checkpoint reads only the new
+  // commits. Between branches the walk yields, so even a first build
+  // over a large store never holds the shared plugin host's event
+  // loop for its whole duration.
   async trajectoryProject(name) {
     if (!this.projectExists(name)) return null
     const branches = []
@@ -643,37 +673,29 @@ export class SimBackend {
       const commits = []
       let id = this.head(name, branch)
       while (id) {
-        const c = this.readCommit(name, id)
+        const c = this.readCommitSummary(name, id)
         if (c.branch === branch) {
           commits.push({
             id: c.id, parent: c.parent, message: c.message, time: c.time,
             files: c.files, logicalBytes: c.logicalBytes, newBytes: c.newBytes,
-            delta: c.delta ?? { added: 0, modified: 0, deleted: 0 },
+            delta: c.delta,
             ...(c.agent ? { agent: c.agent } : {}),
           })
         }
         id = c.parent
       }
       branches.push({ name: branch, commits: commits.reverse() })
+      await new Promise((r) => setImmediate(r))
     }
     return { name, branches }
   }
 
   // The whole recorded trajectory: what the magpie page replays.
-  // Incremental: walking every branch's whole chain is the price of
-  // the first call only. Later calls reuse the last walk when nothing
-  // moved — the fingerprint is every branch's head plus a hash of the
-  // events file, and commits are immutable, so an unchanged
-  // fingerprint means an unchanged trajectory. A checkpoint, fork or
-  // publish moves a head and appends an event, so the next call
-  // re-walks. The stamp itself is always fresh.
+  // The walk is cheap after the first build: readCommitSummary caches
+  // every record's summary, so a rebuild reads only commits it has
+  // never seen — a second rebuild with nothing new reads no records
+  // at all (a test pins that). The stamp itself is always fresh.
   async trajectory() {
-    const fingerprint = this._trajFingerprint()
-    if (this._trajCache && this._trajCache.fingerprint === fingerprint) {
-      const out = structuredClone(this._trajCache.data)
-      out.generatedAt = nowIso()
-      return out
-    }
     const projects = []
     if (existsSync(this.projectsDir)) {
       for (const name of readdirSync(this.projectsDir).sort()) {
@@ -682,7 +704,7 @@ export class SimBackend {
       }
     }
     const st = await this.status()
-    const data = {
+    return {
       generatedAt: nowIso(), backend: this.kind, projects,
       events: this.readEvents(),
       totals: {
@@ -690,26 +712,6 @@ export class SimBackend {
         savedBytes: st.savedBytes, dedupRatio: st.dedupRatio, workspaces: st.workspaces,
       },
     }
-    this._trajCache = { fingerprint, data }
-    return data
-  }
-
-  // Everything a trajectory is a function of, and nothing else: every
-  // branch's head (commits are immutable, so heads pin the chains)
-  // plus the events file's hash (the file is capped at 500 entries,
-  // so its length alone would not pin it).
-  _trajFingerprint() {
-    const heads = {}
-    if (existsSync(this.projectsDir)) {
-      for (const name of readdirSync(this.projectsDir).sort()) {
-        const branches = {}
-        for (const branch of this.listBranches(name)) branches[branch] = this.head(name, branch)
-        heads[name] = branches
-      }
-    }
-    let eventsHash = "none"
-    try { eventsHash = sha256(readFileSync(join(this.root, "events.json"))) } catch { /* no events yet */ }
-    return JSON.stringify({ heads, eventsHash })
   }
 
   // The recorded trajectory is built ON DEMAND by trajectory() and
