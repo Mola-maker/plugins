@@ -1,0 +1,37 @@
+{
+  "name": "@magpie-community/page-mihomo-exits",
+  "version": "0.1.0",
+  "description": "A mihomo-kernel traffic splitter for magpie: a TUN virtual adapter (or the system proxy) with one exit per provider, set on a page in magpie's window",
+  "type": "module",
+  "files": ["mihomo.hooks.ts", "manage", "page", "README.md"],
+  "keywords": ["magpie", "magpie-page", "mihomo", "tun", "traffic", "exit", "proxy"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/magpie-community/plugins.git", "directory": "packages/mihomo-exits" },
+  "magpie": {
+    "page": {
+      "title": "Traffic exits",
+      "titles": { "zh": "流量出口", "zh-TW": "流量出口", "ja": "トラフィック出口", "de": "Traffic-Exits" },
+      "file": "page/index.html",
+      "icon": "page/icon.svg"
+    },
+    "panels": [
+      {
+        "slot": "provider",
+        "title": "Traffic exit",
+        "titles": { "zh": "流量出口", "zh-TW": "流量出口", "ja": "トラフィック出口", "de": "Traffic-Exit" },
+        "file": "page/panel.html"
+      }
+    ],
+    "actions": [
+      {
+        "id": "traffic-exit",
+        "menu": "provider",
+        "title": "Traffic exit…",
+        "titles": { "zh": "流量出口…", "zh-TW": "流量出口…", "ja": "トラフィック出口…", "de": "Traffic-Exit…" }
+      }
+    ],
+    "hooks": "./mihomo.hooks.ts",
+    "permissions": ["providers:list", "usage:summary"],
+    "options": { "mode": "off", "subscription": "", "defaultExit": "DIRECT", "mirror": "", "kernelPath": "", "exits": [], "routes": [] }
+  }
+}

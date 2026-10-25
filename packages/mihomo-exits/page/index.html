@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traffic exits</title>
+<link rel="stylesheet" href="style.css">
+<script src="_magpie/bridge.js"></script>
+<script src="view.js"></script>
+<script src="menu.js"></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1 data-t="title">Traffic exits</h1>
+  <div class="seg" role="tablist" id="modes">
+    <button type="button" role="tab" data-mode="tun" data-t="modeTun">Virtual NIC</button>
+    <button type="button" role="tab" data-mode="proxy" data-t="modeProxy">System proxy</button>
+    <button type="button" role="tab" data-mode="off" data-t="modeOff">Off</button>
+  </div>
+</header>
+<p class="hint" id="modeHint"></p>
+<p class="error" id="error" hidden></p>
+
+<section class="card">
+  <h2 data-t="setup">Subscription</h2>
+  <div class="sub-row">
+    <input id="subscription" type="url" spellcheck="false" autocomplete="off" placeholder="https://…/clash.yaml">
+    <button type="button" class="act primary" id="saveSub" data-t="save">Save</button>
+  </div>
+  <p class="muted" data-t="setupHint"></p>
+  <details class="adv" id="advanced">
+    <summary data-t="advanced">Advanced</summary>
+    <label class="field"><span data-t="mirror">Download mirror</span><input id="mirror" type="url" spellcheck="false" autocomplete="off"></label>
+    <small class="muted" data-t="mirrorHint"></small>
+    <label class="field"><span data-t="kernelPath">Kernel path</span><input id="kernelPath" type="text" spellcheck="false" autocomplete="off"></label>
+    <small class="muted" data-t="kernelPathHint"></small>
+  </details>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2 data-t="exits">Exits</h2>
+    <button type="button" class="act" id="addExit" data-t="addExit">Add exit</button>
+  </div>
+  <ol class="rows" id="exitList"></ol>
+  <p class="muted" id="noSub" data-t="noSub" hidden></p>
+  <p class="muted" data-t="exitHint"></p>
+  <div class="add-form" id="exitForm" hidden>
+    <input id="exitLabel" type="text" autocomplete="off">
+    <input id="exitFilter" type="text" spellcheck="false" autocomplete="off" class="mono">
+    <div class="seg small" role="tablist" id="exitType">
+      <button type="button" role="tab" data-type="url-test" data-t="typeUrlTest">Fastest</button>
+      <button type="button" role="tab" data-type="select" data-t="typeSelect">Manual</button>
+      <button type="button" role="tab" data-type="fallback" data-t="typeFallback">Fallback</button>
+    </div>
+    <button type="button" class="act primary" id="exitSave" data-t="add">Add</button>
+    <button type="button" class="act" id="exitCancel" data-t="cancel">Cancel</button>
+  </div>
+</section>
+
+<section class="card">
+  <h2 data-t="providers">Providers</h2>
+  <p class="muted" data-t="providersHint"></p>
+  <ol class="rows" id="providerList"></ol>
+  <p class="empty" id="noProviders" data-t="noProviders" hidden></p>
+</section>
+
+<section class="card flow-card">
+  <div class="card-head">
+    <h2 data-t="flow">Flow</h2>
+    <div class="seg small" role="tablist" id="anim">
+      <button type="button" role="tab" data-anim="on" data-t="animOn">Animate</button>
+      <button type="button" role="tab" data-anim="off" data-t="animOff">Still</button>
+    </div>
+  </div>
+  <svg id="flow" aria-hidden="true"></svg>
+  <div class="legend" id="legend"></div>
+  <p class="muted" data-t="flowNote"></p>
+</section>
+
+<footer><p class="muted" data-t="footer"></p></footer>
+</body>
+</html>

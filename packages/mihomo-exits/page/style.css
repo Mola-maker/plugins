@@ -1,0 +1,108 @@
+/* The page takes magpie's theme through the --magpie-* variables the bridge
+   paints, light or dark, and keeps its manners: the same cards, the same
+   segmented control, the same motion, still when the window is asked to be. */
+:root {
+  --bg: var(--magpie-bg, #f4f4f6);
+  --card: var(--magpie-card, #ffffff);
+  --fg: var(--magpie-fg, #1d1d1f);
+  --fg-2: var(--magpie-fg-2, #3c3c43);
+  --muted: var(--magpie-muted, #6e6e73);
+  --faint: var(--magpie-faint, #a5a5aa);
+  --line: var(--magpie-line, #e3e3e8);
+  --accent: var(--magpie-accent, #4f46e5);
+  --accent-soft: var(--magpie-accent-soft, #eeedfd);
+  --accent-fg: var(--magpie-accent-fg, #ffffff);
+  --green: var(--magpie-green, #248a3d);
+  --red: var(--magpie-red, #d70015);
+  --amber: var(--magpie-amber, #b25000);
+  --font: var(--magpie-font, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
+  --code: var(--magpie-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  --ease: cubic-bezier(.25, .9, .3, 1);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); }
+body { padding: 20px 24px 32px; font: 13px/1.45 var(--font); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+h2 { font-size: 13px; font-weight: 600; margin: 0; }
+.muted, .hint { color: var(--muted); }
+.hint { margin: 8px 0 0; min-height: 1.45em; }
+.error { color: var(--red); margin: 8px 0 0; }
+.empty { color: var(--muted); margin: 10px 0 0; }
+
+/* the mode switch, drawn as the window draws its own */
+.seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); }
+.seg button { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 6px; padding: 3px 10px; cursor: default; transition: color .18s var(--ease), background .18s var(--ease); }
+.seg button[aria-selected="true"], .seg button[aria-pressed="true"] { color: var(--fg); background: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
+.seg.small button { padding: 2px 8px; font-size: 12px; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 14px; animation: card-in .35s var(--ease); }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+@keyframes card-in { from { opacity: 0; transform: translateY(-3px) scale(.985); } }
+
+button.act { font: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; color: var(--fg); transition: border-color .15s, background .15s; }
+button.act:hover { border-color: var(--faint); }
+button.act.primary { background: var(--accent); border-color: transparent; color: var(--accent-fg); }
+button.act.danger { color: var(--red); }
+button.act:disabled { opacity: .5; }
+
+input[type="url"], input[type="text"] { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; width: 100%; }
+input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sub-row { display: flex; gap: 8px; }
+.sub-row input { flex: 1; min-width: 0; }
+details.adv summary { cursor: default; color: var(--muted); margin-top: 10px; }
+details.adv .field { display: grid; grid-template-columns: 120px minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 8px; }
+details.adv .field small { grid-column: 2; color: var(--muted); }
+
+/* exits and providers: rows like the window's lists */
+ol.rows { list-style: none; margin: 0; padding: 0; }
+ol.rows > li { display: grid; gap: 4px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+ol.rows > li:last-child { border-bottom: 0; }
+.row-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row-main .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-main .grow { flex: 1; min-width: 0; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.exit-btn { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; color: var(--fg-2); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; max-width: 200px; transition: border-color .15s, background .15s; }
+.exit-btn:hover { border-color: var(--faint); }
+.exit-btn .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.exit-btn::after { content: ""; border: 4px solid transparent; border-top-color: var(--faint); margin-top: 3px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font: 11px/1 var(--code); color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; display: inline-flex; gap: 5px; align-items: center; }
+.chip button { border: 0; background: none; color: var(--faint); font: inherit; padding: 0; }
+.chip button:hover { color: var(--red); }
+.chip.catalog { border-style: dashed; }
+.add-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.add-form input { flex: 1 1 160px; min-width: 0; }
+li.flash { animation: flash 1.6s var(--ease); }
+@keyframes flash { 0%, 60% { background: var(--accent-soft); } 100% { background: transparent; } }
+
+/* the menu, drawn the window's way */
+.menu { position: fixed; z-index: 30; min-width: 180px; max-height: 280px; overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .14); padding: 4px; animation: menu-in .14s var(--ease); }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-2px) scale(.98); } }
+.menu button { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; font: inherit; font-size: 12.5px; text-align: left; background: none; border: 0; border-radius: 6px; padding: 5px 8px; color: var(--fg); }
+.menu button small { color: var(--muted); font-size: 11px; }
+.menu button:hover, .menu button.focus { background: var(--accent-soft); }
+.menu button[aria-selected="true"] { color: var(--accent); font-weight: 500; }
+
+/* the flow map */
+.flow-card svg { display: block; width: 100%; height: 240px; }
+.flow-card svg text { font: 11px var(--font); fill: var(--fg-2); }
+.flow-card .node-default text { fill: var(--muted); }
+.flow-card .link { fill: none; stroke-width: 1.5; opacity: .5; }
+.flow-card .link.dim { stroke-dasharray: 3 4; opacity: .3; }
+.flow-card .packet { stroke: none; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.legend i { width: 8px; height: 8px; border-radius: 50%; }
+footer p { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 10px; }
+
+/* the panel a provider's editor carries */
+.panel h2 { margin-bottom: 2px; }
+.panel .row-main { margin-top: 10px; }
+.panel .exit-btn { max-width: 220px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .card, .menu, li.flash { animation: none; }
+  .seg button, button.act, .exit-btn { transition: none; }
+}

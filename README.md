@@ -110,6 +110,7 @@ These add a page to magpie's window, in the app and in `magpie web`, under Plugi
 | Package | Page | Reads |
 |---|---|---|
 | [usage](packages/usage) | Usage glance: calls, errors, tokens and cost for today, 7 or 30 days, and the models behind them | `usage:summary` |
+| [mihomo-exits](packages/mihomo-exits) | Mihomo exits: a mihomo-kernel TUN virtual adapter (or the system proxy) with one exit per provider — direct, or nodes of your subscription picked by name — on the page, in a panel of every provider's editor and the providers' menu, with an animated map of where each provider's traffic leaves | `providers:list`, `usage:summary` |
 
 ```sh
 magpie plugin add @magpie-community/page-<name>

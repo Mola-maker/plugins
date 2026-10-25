@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traffic exit</title>
+<link rel="stylesheet" href="style.css">
+<script src="_magpie/bridge.js"></script>
+<script src="view.js"></script>
+<script src="menu.js"></script>
+<script src="panel.js" defer></script>
+</head>
+<body>
+<section class="panel">
+  <h2 data-t="title">Traffic exit</h2>
+  <p class="muted" data-t="panelHint"></p>
+  <div class="row-main">
+    <button type="button" class="exit-btn" id="exitBtn">
+      <span class="dot" id="exitDot"></span>
+      <span class="lbl" id="exitLbl"></span>
+    </button>
+    <span class="muted" id="domains" style="font-size:12px"></span>
+  </div>
+  <p class="muted" id="note" style="font-size:12px"></p>
+</section>
+</body>
+</html>
