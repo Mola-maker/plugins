@@ -42,26 +42,28 @@ and they live and die with the workspace directory itself. Files a
 command writes to the host's real `/tmp` are likewise outside LayerFS
 management — if it matters, it belongs in the workspace.
 
-## Backends
+## Backend
 
-- **sim** (the only backend in this registry package) — a local
-  content-addressed store implementing the same model: immutable
-  blobs named by SHA-256, branches as manifest pointers, checkpoints
-  as deduplicated manifests, under `MAGPIE_LAYERFS_HOME` (default
-  `~/.magpie-layerfs`). It runs anywhere, which is what the tests
+- **sim** — a local content-addressed store implementing the LayerFS
+  model: immutable blobs named by SHA-256, branches as manifest
+  pointers, checkpoints as deduplicated manifests, under
+  `MAGPIE_LAYERFS_HOME` (default `~/.layerfs-tools`; a
+  `~/.magpie-layerfs` from 0.7.2 or earlier is moved there once, with a
+  link left at the old path). It runs anywhere, which is what the tests
   and the benchmark below use.
 
-The native backend — the real LayerFS through its JavaScript SDK —
-is not shipped here: the SDK is still not published to npm, so
-there is no pinned version to depend on, and the registry package
-must not load unversioned code from a path the user's environment
-names. It lives in the standalone repo
-([Mola-maker/magpie-layerfs](https://github.com/Mola-maker/magpie-layerfs))
-and returns here once the SDK is published and the plugin can pin
-it as a dependency.
+**This package is sim-only.** The native backend — the real LayerFS
+through its JavaScript SDK — is developed in the standalone repo,
+[Mola-maker/magpie-layerfs](https://github.com/Mola-maker/magpie-layerfs),
+and is not part of this package: shipping it here needs a pinned,
+integrity-checked npm dependency, and `@layerfs/sdk` is not
+published to npm, so there is no version to pin. It returns in a
+follow-up PR once the SDK is published. Asking for it
+(`MAGPIE_LAYERFS_BACKEND=native`, `MAGPIE_LAYERFS_NATIVE=1`, or the
+old `"native"` plugin option) is an explicit error that says so.
 
-`MAGPIE_LAYERFS_BACKEND=auto|sim` selects explicitly (`auto` is the
-default); `native` is refused.
+`MAGPIE_LAYERFS_BACKEND=auto|sim` selects explicitly; both mean sim
+here.
 
 ## Safety defaults
 
