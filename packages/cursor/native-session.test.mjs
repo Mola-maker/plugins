@@ -322,6 +322,99 @@ test("native protocol: a step that stops sending fails batchWait after its lates
   }
   run.pump(stalled())
   await until(() => run.error)
-  expect(run.error).toMatchObject({ status: 502, message: "Cursor did not complete its declared native tool batch" })
+  expect(run.error).toMatchObject({ status: 502, message: expect.stringMatching(/^Cursor did not complete its declared native tool batch: 2 of 3 calls came/) })
   expect(Date.now() - started).toBeGreaterThanOrEqual(440)
+})
+
+// #377 (Okxdd123, grok-4.7): a step that counted its batch, then thought,
+// then wrote one long call's arguments for over batchWait, sending only
+// heartbeats while it wrote, failed as a batch never completed. A
+// heartbeat is Cursor still on the step; silence and a heartbeat-only
+// stretch are bounded by idle and quiet (#2672).
+test("native protocol: heartbeats while a counted call's arguments are written keep the batch open (#377)", async () => {
+  const { run } = owner({}, { batchWait: 300 })
+  async function* slow() {
+    yield* frames([update(27, uint(1, 1)), update(4, text(1, "thinking"))])
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 100))
+      yield* frames([update(13, Buffer.alloc(0))])
+    }
+    yield* frames([tool(7, "call-7", "long arguments")])
+    await new Promise(() => {})
+  }
+  run.pump(slow())
+  await until(() => run.error || run.state === "awaiting-results")
+  expect(run.error).toBeUndefined()
+  expect(run.segment.events.filter((e) => e.tool)).toHaveLength(1)
+})
+
+test("native protocol: a batch that never completes says how much of it came (#377)", async () => {
+  const { run } = owner({}, { batchWait: 200 })
+  run.pump((async function* () {
+    yield* frames([tool(7, "call-7", "one"), update(27, uint(1, 3))])
+    await new Promise(() => {})
+  })())
+  await until(() => run.error)
+  expect(run.error.message).toMatch(/^Cursor did not complete its declared native tool batch: 1 of 3 calls came, 0 answered here, none since \d+ ms$/)
+})
+
+// #2672 bounds each wait on Cursor, not the step: calls that keep coming,
+// each sooner than idle, seal however long the step takes in all.
+test("native protocol: a step whose calls each come within idle outlasts idle in all (#2672)", async () => {
+  const { run } = owner({}, { batchWait: 1000, idle: 200 })
+  async function* spread() {
+    for (const id of [7, 8, 9]) {
+      yield* frames([tool(id, "call-" + id, "long arguments " + id)])
+      await new Promise((r) => setTimeout(r, 150))
+    }
+    yield* frames([update(27, uint(1, 3))])
+    await new Promise(() => {})
+  }
+  run.pump(spread())
+  await until(() => run.error || run.state === "awaiting-results")
+  expect(run.error).toBeUndefined()
+  // parked for the caller: idle no longer counts
+  await new Promise((r) => setTimeout(r, 400))
+  expect(run.error).toBeUndefined()
+  expect(run.state).toBe("awaiting-results")
+})
+
+test("native protocol: a step silent after its first call fails at idle, before batchWait (#2672)", async () => {
+  const { run } = owner({}, { batchWait: 5000, idle: 150 })
+  const started = Date.now()
+  run.pump((async function* () {
+    yield* frames([update(4, text(1, "thinking")), tool(7, "call-7", "one")])
+    await new Promise(() => {})
+  })())
+  await until(() => run.error)
+  expect(run.error).toMatchObject({ status: 502, message: "Cursor went quiet: no message for 0 s, its last message tool call (try again)" })
+  expect(Date.now() - started).toBeLessThan(1000)
+})
+
+// Quiet.frames must not hold the frames it passed on while the stream stays
+// open: a long turn streams many MB through one Run.
+test("native protocol: frames already passed on are not kept while the Run streams on (#2672)", async () => {
+  const { Quiet } = await import("./native-session.mjs")
+  const refs = []
+  let release
+  const held = new Promise((r) => { release = r })
+  async function* src() {
+    for (let i = 0; i < 200; i++) {
+      const f = { data: Buffer.alloc(64 * 1024, i & 255) }
+      refs.push(new WeakRef(f))
+      yield f
+    }
+    await held // the stream stays open
+  }
+  const it = new Quiet(NATIVE_LIMITS, () => {}).frames(src())
+  for (let i = 0; i < 200; i++) await it.next()
+  const pending = it.next()
+  for (let i = 0; i < 5 && refs.some((r) => r.deref()); i++) {
+    Bun.gc(true)
+    await new Promise((r) => setTimeout(r, 0))
+  }
+  // the last frame may still be held by the generator's own state
+  expect(refs.filter((r) => r.deref()).length).toBeLessThanOrEqual(2)
+  release()
+  await pending
 })

@@ -27,9 +27,9 @@ for (const name of readdirSync(root)) {
     const client = { app: { log: async () => {} }, auth: { set: async () => {} }, tui: { showToast: async () => {} }, config: { get: async () => ({ data: {} }) } }
     for (const fn of fns) {
       const hooks = await fn({ client, directory: process.cwd(), worktree: process.cwd(), $: undefined, project: {} })
-      // a plugin of tools alone: each one a name an MCP client takes, a
-      // description, arguments and an execute
-      if (!hooks?.auth && hooks?.tool) {
+      // Tools may also have an auth hook for their own API, without serving
+      // chat models. Check their tools as well as their sign-in methods.
+      if (hooks?.tool) {
         const tools = Object.entries(hooks.tool)
         if (!tools.length) problems.push(`${fn.name}: no tools`)
         for (const [n, t] of tools) {
@@ -38,12 +38,12 @@ for (const name of readdirSync(root)) {
           if (typeof t?.description !== "string" || !t.description) problems.push(`${fn.name}: ${n} has no description`)
           if (!t?.args || typeof t.args !== "object") problems.push(`${fn.name}: ${n} has no args`)
         }
-        continue
+        if (!hooks.auth) continue
       }
       const auth = hooks?.auth
       if (!auth) { problems.push(`${fn.name}: no auth hook`); continue }
       if (typeof auth.provider !== "string" || !auth.provider) problems.push(`${fn.name}: auth.provider`)
-      if (typeof auth.loader !== "function") problems.push(`${fn.name}: auth.loader`)
+      let needsLoader = !hooks.tool
       if (!Array.isArray(auth.methods) || !auth.methods.length) problems.push(`${fn.name}: auth.methods`)
       for (const m of auth.methods ?? []) {
         if (!["oauth", "api"].includes(m.type)) problems.push(`${fn.name}: method type ${m.type}`)
@@ -53,8 +53,13 @@ for (const name of readdirSync(root)) {
         const cfg = { provider: {} }
         await hooks.config(cfg)
         const p = cfg.provider[auth.provider]
-        if (p && (!p.npm || !p.models || !Object.keys(p.models).length)) problems.push(`${fn.name}: config gives ${auth.provider} no npm or models`)
+        const signInOnly = hooks.tool && p?.models && !Object.keys(p.models).length && !p.npm
+        if (p && !signInOnly) {
+          needsLoader = true
+          if (!p.npm || !p.models || !Object.keys(p.models).length) problems.push(`${fn.name}: config gives ${auth.provider} no npm or models`)
+        }
       }
+      if ((needsLoader || auth.loader !== undefined) && typeof auth.loader !== "function") problems.push(`${fn.name}: auth.loader`)
     }
   } catch (e) {
     problems.push(String(e?.stack ?? e))

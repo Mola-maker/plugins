@@ -1,14 +1,15 @@
 import { afterAll, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
-  symlinkSync, writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
+  rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { LayerfsTools } from "./index.mjs"
 import {
-  IMPORT_MAX_FILES, SimBackend, checkSourceDir, createBackend, scanImportTree,
+  DEFAULT_ROOT, IMPORT_MAX_FILES, LEGACY_ROOT, SimBackend, checkSourceDir, createBackend,
+  defaultRoot, scanImportTree,
 } from "./layerfs.mjs"
 
 const sha = (s) => createHash("sha256").update(s).digest("hex")
@@ -23,11 +24,14 @@ function mkTmp(prefix, base = tmpdir()) {
   tmpDirs.push(d)
   return d
 }
+// The cleanup's time grows with the machine's disk load, not with the
+// suite: on a loaded box removing every dir took over bun's default 5s
+// hook bar (#362), so the hook carries its own.
 afterAll(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
   for (const k of Object.keys(process.env)) if (!(k in envSnapshot)) delete process.env[k]
   Object.assign(process.env, envSnapshot)
-})
+}, 120_000)
 
 function fixture() {
   const src = mkTmp("layerfs-src-")
@@ -568,4 +572,48 @@ test("r2 item 7: storedBytes grows by the commit record's size, not just the cha
   expect(recordBytes).toBeGreaterThan(0)
   // pre-fix the growth was 1 (the blob alone); the manifest record is counted now
   expect(after.storedBytes - before.storedBytes).toBe(recordBytes + 1)
+})
+
+// #360: workspace paths go upstream in tool results, so the default root
+// names neither the app nor the host, and an existing ~/.magpie-layerfs
+// is moved once with a link left behind.
+test("#360: a fresh home gets a default root that does not name magpie", () => {
+  const home = mkTmp("lfs-home-")
+  const root = defaultRoot(home)
+  expect(root).toBe(join(home, DEFAULT_ROOT))
+  expect(/magpie/i.test(DEFAULT_ROOT)).toBe(false)
+  expect(existsSync(join(home, LEGACY_ROOT))).toBe(false) // nothing made at the old name
+})
+
+test("#360: a 0.7.2 root is moved once, its workspaces answer the new path, and the old path still resolves", async () => {
+  const home = mkTmp("lfs-home-")
+  const legacy = join(home, LEGACY_ROOT)
+  const old = new SimBackend(legacy) // what 0.7.2 made at the old default
+  const ws = await old.provision("website", "main", fixture())
+  writeFileSync(join(ws.path, "kept.txt"), "work in progress\n")
+
+  const root = defaultRoot(home)
+  expect(root).toBe(join(home, DEFAULT_ROOT))
+  expect(lstatSync(legacy).isSymbolicLink()).toBe(true)
+  expect(realpathSync(legacy)).toBe(realpathSync(root))
+  expect(readFileSync(join(ws.path, "kept.txt"), "utf8")).toBe("work in progress\n") // old path, via the link
+
+  const b = new SimBackend(root)
+  const again = await b.provision("website", "main")
+  expect(again.reused).toBe(true)
+  expect(again.path).toBe(join(root, "workspaces", "website", "main"))
+  expect(readFileSync(join(again.path, "kept.txt"), "utf8")).toBe("work in progress\n")
+  const cp = await b.checkpoint("website", "main", "after the move")
+  expect(cp.added).toBe(1)
+
+  expect(defaultRoot(home)).toBe(root) // the second call moves nothing
+  expect(lstatSync(legacy).isSymbolicLink()).toBe(true)
+})
+
+test("#360: a legacy root the user made a link is used where it is", () => {
+  const home = mkTmp("lfs-home-")
+  const elsewhere = mkTmp("lfs-elsewhere-")
+  symlinkSync(elsewhere, join(home, LEGACY_ROOT), "dir")
+  expect(defaultRoot(home)).toBe(join(home, LEGACY_ROOT))
+  expect(existsSync(join(home, DEFAULT_ROOT))).toBe(false)
 })

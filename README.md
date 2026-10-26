@@ -17,6 +17,7 @@ subscription and makes its requests. The packages work in OpenCode and in
 | [cursor](packages/cursor) | Cursor subscriptions (Pro, Pro+, Ultra, Teams), on the API cursor-agent talks to | `cursor` |
 | [devin](packages/devin) | Devin subscription (the devin CLI's account) | `devin` |
 | [factory](packages/factory) | Factory (Droid) subscription | `factory` |
+| [gcp-ai](packages/gcp-ai) | Google Cloud Vertex AI with your own gcloud / ADC login (needs `gcloud` and Chrome), plus the project's promotional credits | `gcp-ai` |
 | [grok](packages/grok) | Grok (SuperGrok / X Premium+), through the Grok Build CLI's sign-in | `grok` |
 | [joycode](packages/joycode) | JoyCode IDE credits with JD account browser sign-in, live models and credit multipliers (unofficial) | `joycode` |
 | [kimi-work](packages/kimi-work) | Ordinary Kimi desktop Work subscription, through the desktop app's local sign-in; separate from Kimi Code | `kimi-work` |
@@ -88,6 +89,7 @@ These give tools to every agent magpie connects. magpie serves them on its MCP s
 
 | Package | Tools |
 |---|---|
+| [search1api](packages/search1api) | Web search, news, agentic search, page retrieval, sitemaps and trends, with Search1API OAuth or an API key |
 | [calc](packages/calc) | `eval` exact arithmetic in fractions, `convert` units (data, time, length, mass, angle, temperature), `date` calendar date math across time zones and DST. No network, no key |
 
 ```sh
@@ -149,11 +151,13 @@ Agent skills for magpie users, in `skills/<name>/SKILL.md`.
 
 | Skill | What it does |
 |---|---|
+| [magpie-setup](skills/magpie-setup) | Lets an agent set magpie up as the user asks, through its own `magpie` commands: keys and subscriptions, an agent's model, routing groups with fallbacks and time-of-day rules, gateway keys with budgets, and MCP servers and instructions shared with every agent |
 | [magpie-quota](skills/magpie-quota) | Lets an agent check what is left of every subscription, coding plan and key balance magpie has (`magpie quota --json`), and wait for allowance to come back |
 
-In magpie, it is first under Library › Market › Skills. Elsewhere:
+In magpie, they are first under Library › Market › Skills. Elsewhere:
 
 ```sh
+npx skills add magpie-community/plugins --skill magpie-setup
 npx skills add magpie-community/plugins --skill magpie-quota
 ```
 

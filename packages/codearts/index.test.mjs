@@ -404,8 +404,10 @@ const day = 86_400_000
 const iso = (ms) => new Date(ms).toISOString()
 function creditFetcher(now = Date.now()) {
   const planEnd = now + 31 * day
-  const signUp = now + 30 * day
-  const checkin = signUp + 52_000 // the same Beijing day, a minute later
+  // Noon in Beijing, so the check-in a minute later is the same Beijing day
+  // whatever the wall clock (#322).
+  const signUp = Math.floor((now + 30 * day + 8 * 3600_000) / day) * day + 4 * 3600_000
+  const checkin = signUp + 52_000
   const ok = (data) => new Response(JSON.stringify({ code: 0, message: "ok", data }), { status: 200 })
   const fetcher = async (url, init) => {
     const u = String(url)
@@ -433,6 +435,16 @@ function creditFetcher(now = Date.now()) {
   }
   return { fetcher, planEnd, signUp, checkin }
 }
+
+test("the credit fixture's check-in is its sign-up's Beijing day at any hour (#322)", () => {
+  const bj = (ms) => new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
+  const midnight = Date.parse("2026-10-24T16:00:00Z") // 00:00 in Beijing
+  for (const now of [midnight - 30_000, midnight - 1, midnight, midnight + 12 * 3600_000]) {
+    const { signUp, checkin, planEnd } = creditFetcher(now)
+    assert.equal(bj(checkin), bj(signUp))
+    assert.ok(signUp > now && checkin < planEnd)
+  }
+})
 
 test("fetchCreditBatches reads every batch with its own expiry, signed", async () => {
   const { fetcher, planEnd, signUp, checkin } = creditFetcher()

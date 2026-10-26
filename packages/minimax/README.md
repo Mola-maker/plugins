@@ -107,6 +107,10 @@ Variants map to what MiniMax Code sends:
 
 The usage card shows:
 - the credits left;
+- a Credits window: how much of the credits not yet expired is used, and
+  when the soonest of them runs out, from the credit details MiniMax's own
+  client lists (`/minimax-cloud/api/v1/credit/details`); beside an M Plan
+  it is aside, since the plan's windows come first;
 - the plan: Free, or the M Plan's tier and when it ends;
 - for an M Plan, its windows (5 hours, 7 days, and any model's own) from
   `coding_plan/remains`.

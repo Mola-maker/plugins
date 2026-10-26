@@ -246,7 +246,10 @@ test("a model the gift does not serve goes to the coding plan as sent", async ()
   const m = sent.at(-1)
   expect(m.origin).toBe("https://api.z.ai")
   expect(m.path).toBe("/api/anthropic/v1/messages")
-  expect(m.body).toBe(body("GLM-5.3"))
+  // as sent, but for the sign-in's device and the conversation, as ZCode names them (#387)
+  const session = _internal.sessionOf("", DEVICE)
+  expect(m.headers["x-session-id"]).toBe(session)
+  expect(JSON.parse(m.body)).toEqual({ ...JSON.parse(body("GLM-5.3")), metadata: { user_id: JSON.stringify({ device_id: DEVICE, account_uuid: "", session_id: session }) } })
   expect(m.headers["x-api-key"]).toBe(KEY)
   expect(m.headers["x-title"]).toBeUndefined()
 })
@@ -392,4 +395,53 @@ test("a gift-only account sends every request to the gift, and reads no balance 
   expect(res.status).toBe(200)
   expect(sent.at(-1).origin).toBe("https://zcode.z.ai")
   expect(sent.filter((c) => c.path === "/api/v1/zcode-plan/billing/balance").length).toBe(0)
+})
+
+// #369: a GLM Coding Plan account whose plan list read no plan once was sent
+// to the Start Plan for ten minutes, and every request answered 405
+test("a key's plan list that once reads no plan after reading one is asked again in a minute", async () => {
+  answers["/api/biz/subscription/list"] = ok([{ productName: "GLM Coding Lite", status: "VALID" }])
+  answers["/api/v1/zcode-plan/billing/balance"] = ok(balance)
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  await sendTo(MSG, body("GLM-5.3"))
+  const id = KEY + "\0" + jwt
+  expect(_internal.routes.get(id)).toMatchObject({ start: false, ttl: 600_000 })
+  _internal.routes.get(id).at = 0 // the ten minutes are up
+  answers["/api/biz/subscription/list"] = ok([])
+  await sendTo(MSG, body("GLM-5.3"))
+  expect(_internal.routes.get(id)).toMatchObject({ start: true, ttl: 60_000 })
+  // read the same way again, it is known: ten minutes
+  _internal.routes.get(id).at = 0
+  await sendTo(MSG, body("GLM-5.3"))
+  expect(_internal.routes.get(id)).toMatchObject({ start: true, ttl: 600_000 })
+})
+
+test("a Start Plan refusal on a key account reads its plans again on the next request", async () => {
+  answers["/api/biz/subscription/list"] = ok([{ productName: "GLM Coding Lite", status: "VALID" }])
+  answers["/api/v1/zcode-plan/billing/balance"] = ok(balance)
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(JSON.stringify({ error: { message: "Method Not Allowed" } }), { status: 405 })
+  const id = KEY + "\0" + jwt
+  _internal.routes.set(id, { start: true, gift: null, at: Date.now(), ttl: 600_000 })
+  let res = await sendTo(MSG, body("GLM-5.3"))
+  expect(res.status).toBe(405)
+  expect(sent.at(-1).origin).toBe("https://zcode.z.ai")
+  res = await sendTo(MSG, body("GLM-5.3"))
+  expect(res.status).toBe(200)
+  expect(sent.at(-1).origin).toBe("https://api.z.ai")
+  expect(sent.at(-1).headers["x-api-key"]).toBe(KEY)
+})
+
+// #379: a plan bought, a gift claimed or a plan lapsed reaches the requests
+// when the card shows it
+test("a card read reads the route again", async () => {
+  answers["/api/biz/subscription/list"] = ok([{ productName: "GLM Coding Pro", status: "VALID" }])
+  answers["/api/v1/zcode-plan/billing/balance"] = ok(balance)
+  answers["/api/monitor/usage/quota/limit"] = ok({ limits: [{ type: "CREDIT_LIMIT", unit: 6, number: 1, percentage: 10 }] })
+  const id = KEY + "\0" + jwt
+  _internal.routes.set(id, { start: true, gift: null, at: Date.now(), ttl: 600_000 })
+  const u = await (await hooks()).usage(async () => coding, { id: "zcode" })
+  expect(u.windows[0].used).toBe(10)
+  expect(_internal.routes.get(id)).toMatchObject({ start: false, gift: { models: ["glm-5.3-flash"] } })
 })

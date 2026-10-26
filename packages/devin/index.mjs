@@ -985,7 +985,10 @@ async function cliSignIn() {
         const c = readCredentials(await readFile(path, "utf8"))
         if (!c.windsurf_api_key) return { type: "failed", error: `Devin isn't signed in: ${path} has no key` }
         const r = await success(c.windsurf_api_key, (c.api_server_url || SERVER).replace(/\/+$/, ""))
-        r.metadata.cli = true
+        // a string: OpenCode 1 keeps an auth's metadata as strings and drops
+        // an auth.json entry with any other value, so its requests go past
+        // this fetch to BASE (a 404). live() takes it as truthy.
+        r.metadata.cli = "true"
         return r
       } catch (e) {
         return { type: "failed", error: e?.code === "ENOENT" ? "Devin isn't signed in: run `devin auth login`" : e.message }

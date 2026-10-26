@@ -513,7 +513,10 @@ function limits(c) {
 // allowanceOf makes a credits reply into the plan's windows: the 5-hour
 // and weekly limits, and the dollars as one more, used of the CLI's pool
 // (the plan's month of credits, or what is left of it if more, and the
-// bought and free ones) as its /usage bar is. A reply with neither windows
+// bought and free ones) as its /usage bar is. The dollars, the plan's
+// whole allowance, go second, after the 5-hour window: magpie's account
+// line and menu bar show an account's first two windows, and with them
+// last the Credits bar was never there (01huadalang on Discord). A reply with neither windows
 // nor a plan tells a balance: a key's money, not an allowance. The month's
 // credits come back at until, the end of the plan's period
 // (billing/subscriptions' currentPeriodEnd), when it is known
@@ -535,7 +538,7 @@ function allowanceOf(c, until) {
   }
   if (known && planMonthly > 0) {
     const pool = Math.max(planMonthly, monthly) + left - monthly
-    out.windows.push({ name: "Credits", used: Math.min(100, (100 * (pool - left)) / pool), display: money(pool - left) + " / " + money(pool), ...(until ? { resetsAt: until } : {}) })
+    out.windows.splice(1, 0, { name: "Credits", used: Math.min(100, (100 * (pool - left)) / pool), display: money(pool - left) + " / " + money(pool), ...(until ? { resetsAt: until } : {}) })
   } else if (known && !out.windows.length) out.balance = money(left)
   return out
 }

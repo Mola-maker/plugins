@@ -11,11 +11,14 @@ import { createBackend } from "./layerfs.mjs"
 const envSnapshot = { ...process.env }
 const dirs = []
 const mk = (p) => { const d = mkdtempSync(join(tmpdir(), p)); dirs.push(d); return d }
+// The cleanup's time grows with the machine's disk load, not with the
+// suite: on a loaded box removing every dir took over bun's default 5s
+// hook bar (#362), so the hook carries its own.
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true })
   for (const k of Object.keys(process.env)) if (!(k in envSnapshot)) delete process.env[k]
   Object.assign(process.env, envSnapshot)
-})
+}, 120_000)
 
 const named = (s) => /magpie/i.test(String(s))
 const message = async (p) => { try { await p; return "" } catch (e) { return String(e?.message ?? e) } }

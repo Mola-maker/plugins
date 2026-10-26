@@ -17,7 +17,8 @@ function record() {
     const headers=Object.fromEntries(new Headers(init.headers));
     sent.push({url:String(url),headers,body:typeof init.body==='string'?init.body:''});
     if(String(url).endsWith('/models'))return Response.json({data:[{id:'k3-agent',context_length:262144}]});
-    if(String(url).includes('DescribeKimiWorkConfig'))return Response.json({});
+    // a menu with models: an empty one is asked again without the sign-in
+    if(String(url).includes('DescribeKimiWorkConfig'))return new Response(fs.readFileSync(new URL('./tests/fixtures/work-config.mac.json',import.meta.url)),{headers:{'Content-Type':'application/json'}});
     if(String(url).includes('GetSubscriptionStats'))return Response.json({subscriptionBalance:{amountUsedRatio:0.25}});
     return new Response('data: [DONE]\n\n',{headers:{'Content-Type':'text/event-stream'}});
   };

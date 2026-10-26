@@ -738,7 +738,8 @@ test("known lifetimes take precedence over the fallback and use the earlier boun
 
 test("fallback expiry does not extend an explicitly expired or malformed lifetime", async () => {
   const cases = [
-    ...[0, -1, null, "3600", 1e308].map(expires_in => ({ expires_in })),
+    ...[0, -1, 1e308].map(expires_in => ({ expires_in })),
+    ...[null, "3600"].map(expires_in => ({ expires_in, access_token: jwt({ exp: undefined }) })),
     ...[0, -1, null, "1800003600", 1e308].map(exp => ({ expires_in: undefined, access_token: jwt({ exp }) })),
   ]
   for (const fields of cases) {
@@ -748,6 +749,19 @@ test("fallback expiry does not extend an explicitly expired or malformed lifetim
     assert.equal(got.expires, 1)
     assert.equal(metadata(got).token, "rotated-test-refresh", "a bad lifetime cannot discard an already rotated refresh token")
     assert.throws(() => flow.current({ type: "oauth", ...got }), /unusable_inference_jwt/)
+  }
+})
+
+// #328: Nous sending expires_in null or as a string must not make a sign-in
+// whose JWT exp is valid unusable; the exp decides, as Hermes's does
+test("a null or string expires_in beside a valid JWT exp takes the exp", async () => {
+  for (const expires_in of [null, "3600", "", {}]) {
+    const c = clock()
+    const exp = (NOW + 600000) / 1000
+    const flow = createAuth({}, options(c, async () => json(payload({ expires_in, access_token: jwt({ exp }) }))))
+    const got = await flow.refresh(expiring())
+    assert.equal(got.expires, exp * 1000, `expires_in ${JSON.stringify(expires_in)}`)
+    assert.equal(flow.current({ type: "oauth", ...got }).access, got.access)
   }
 })
 

@@ -33,13 +33,17 @@ const CORE_PARAMETER = {
   grep: "pattern",
   read: "filePath",
 };
-const OPENCODE_VERSION = "1.19.0";
-// What OpenCode 1.19.0 sends as its User-Agent, ai-sdk and Bun included.
-// Each protocol's ai-sdk package bundles its own provider-utils, so the
-// version differs by protocol (captured from the release binary's requests).
-const PROVIDER_UTILS = { chat: "4.0.23", responses: "4.0.40", anthropic: "4.0.46" };
-export function userAgent(protocol) {
-  return `opencode/${OPENCODE_VERSION} ai-sdk/provider-utils/${PROVIDER_UTILS[protocol]} runtime/bun/1.3.14`;
+// What OpenCode 2.0.25 sends as its User-Agent on every protocol:
+// `opencode/${channel}/${version}/${name}` (its App service, read from the
+// release binary and captured from its requests on 2026-10-25). Since
+// 2026-10-26 Zen's free tier answers 429 FreeUsageLimitError ("Free models
+// work in OpenCode") to the exact User-Agent 0.1.6 to 0.1.15 sent, OpenCode
+// 1.19.0's `opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`,
+// whatever the body says; the same request under any other string, OpenCode
+// 2.0.25's included, is served.
+const OPENCODE_VERSION = "2.0.25";
+export function userAgent() {
+  return `opencode/latest/${OPENCODE_VERSION}/cli`;
 }
 // How long a request for a model the last list didn't have waits before it
 // asks Zen's list again: a model Zen made free since is served at once,
@@ -108,6 +112,59 @@ function normalizeTools(body, protocol) {
     );
   }
   return { declared };
+}
+
+// Zen's free tier serves a request as OpenCode's own only when one of its
+// system messages carries OpenCode's environment block: `<env>`, a
+// `Working directory:` line and `</env>`, as every OpenCode prompt ends.
+// A request without one (another agent's own prompt: Kimi Work's,
+// WorkBuddy's) gets a small allowance a day, then 429 FreeUsageLimitError
+// ("Free models work in OpenCode") until 00:00 UTC, whatever its headers
+// say; the same request with the block added is served (tried against
+// opencode.ai on 2026-10-25, deepseek-v4.1-flash-free and
+// glm-5.3-flash-free). In a user message or a tool description it doesn't
+// count, and `<ENV>` or `working directory:` don't either. The directory
+// isn't known here, and the agent's own prompt says it, so it is told as
+// unknown rather than as a path that would mislead the model.
+const ENVIRONMENT = "<env>\n  Working directory: unknown\n</env>";
+const HAS_ENVIRONMENT = /<env>[\s\S]*Working directory:[\s\S]*<\/env>/;
+
+function textOf(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n");
+}
+
+function withEnvironment(content) {
+  if (typeof content === "string") return content ? `${content}\n\n${ENVIRONMENT}` : ENVIRONMENT;
+  if (Array.isArray(content)) return [...content, { type: "text", text: ENVIRONMENT }];
+  return ENVIRONMENT;
+}
+
+const SYSTEM_ROLES = ["system", "developer"];
+
+export function addEnvironment(body, protocol) {
+  if (protocol === "anthropic") {
+    if (!HAS_ENVIRONMENT.test(textOf(body.system))) body.system = withEnvironment(body.system);
+    return;
+  }
+  const messages = protocol === "chat" ? body.messages : body.input;
+  const system = Array.isArray(messages)
+    ? messages.filter((message) => SYSTEM_ROLES.includes(message?.role))
+    : [];
+  if (system.some((message) => HAS_ENVIRONMENT.test(textOf(message.content)))) return;
+  if (protocol === "responses") {
+    if (!HAS_ENVIRONMENT.test(textOf(body.instructions)))
+      body.instructions = withEnvironment(body.instructions);
+    return;
+  }
+  // Added to the agent's own system message, so the prompt stays one
+  // system message, the same on every turn (its cache holds); one is put
+  // first when the agent sent none.
+  const first = system.find((message) => message.role === "system");
+  if (first) first.content = withEnvironment(first.content);
+  else if (Array.isArray(messages)) messages.unshift({ role: "system", content: ENVIRONMENT });
+  else body.messages = [{ role: "system", content: ENVIRONMENT }];
 }
 
 const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -319,26 +376,27 @@ async function server(_input, options = {}) {
             const streaming = body.stream === true;
             body.stream = true;
             const toolPolicy = normalizeTools(body, protocol);
+            addEnvironment(body, protocol);
             if (protocol === "chat")
               body.stream_options = { ...body.stream_options, include_usage: true };
-            // Only what OpenCode 1.19.0 itself sends to its gateway, so a
-            // caller's own headers (an agent's User-Agent, x-stainless-*,
-            // x-session-affinity, ...) never mark the request as not
-            // OpenCode's (packages/opencode/src/session/llm/request.ts).
+            // Only what OpenCode 2.0.25 itself sends to its gateway, so a
+            // caller's own headers (an agent's User-Agent, x-stainless-*, ...)
+            // never mark the request as not OpenCode's.
             const given = request.headers;
             const session = sessionID(given, body);
             const project = _input?.project;
             const headers = new Headers({
               "content-type": "application/json",
               accept: "*/*",
-              "user-agent": userAgent(protocol),
+              "user-agent": userAgent(),
               "x-opencode-project":
                 given.get("x-opencode-project") ||
                 (project?.vcs === "git" && project.id ? project.id : "global"),
               "x-opencode-session": session,
-              "x-opencode-request": opencodeID("msg", false),
               "x-opencode-client": "cli",
               "x-opencode-session-id": session,
+              "x-session-affinity": session,
+              "x-session-id": session,
             });
             if (protocol === "anthropic") {
               headers.set("x-api-key", "public");

@@ -169,3 +169,85 @@ test("ZCode 3.15's plan key is read from its config.json", async () => {
   expect(_internal.stateOf(auth)).toMatchObject({ key: "id1.secret1", base: "https://api.z.ai/api/anthropic" })
   config({})
 })
+
+// wakkana on Discord (WorkBuddy's, the same here): two accounts of one
+// name are two accounts. The sign-in keeps ZCode's user id beside the name,
+// for magpie to tell them apart by, and an entry follows ZCode only while
+// ZCode is signed in to that same user id, not another of its name.
+test("the app's sign-in keeps the user id, and follows ZCode by it", async () => {
+  const as = (id) => JSON.stringify({ name: "Ada", user_id: id })
+  zcodeHas({ [KEY]: "id1.secret1", zcodejwttoken: "j1", "oauth:zai:user_info": as("u1") })
+  const hooks = await ZCodeAuthPlugin({ client: {} })
+  const m = hooks.auth.methods.find((x) => x.label === "ZCode app's sign-in")
+  const got = await (await m.authorize()).callback()
+  expect(got.accountId).toBe("Ada")
+  expect(got.uid).toBe("u1")
+  expect(JSON.parse(got.refresh).uid).toBeUndefined()
+  const auth = { ...got, type: "oauth" }
+
+  zcodeHas({ [KEY]: "id2.secret2", zcodejwttoken: "j2", "oauth:zai:user_info": as("u1") })
+  expect(_internal.stateOf(auth)).toMatchObject({ key: "id2.secret2", jwt: "j2" })
+  expect(_internal.stateOf(auth).uid).toBeUndefined()
+
+  // another account named Ada: A's entry keeps what it saved
+  zcodeHas({ [KEY]: "id3.secret3", zcodejwttoken: "j3", "oauth:zai:user_info": as("u2") })
+  expect(_internal.stateOf(auth)).toMatchObject({ key: "id1.secret1" })
+})
+
+// meraki7304 (#410): ZCode 3.16.3 on a Mac keeps no plan key at all, in
+// credentials.json or config.json, only where the key is: a
+// project-key-location:v1 record. The sign-in reads that key, as ZCode lists
+// it, and the BigModel GLM Coding Plan is found, not only the gift.
+test("ZCode 3.16's key location gives the coding plan its key", async () => {
+  const loc = (fam, account) =>
+    "project-key-location:v1:" + encodeURIComponent(JSON.stringify(["https://bigmodel.cn", fam, account, null, 1, "non-team"]))
+  zcodeHas(
+    {
+      zcodejwttoken: "Bearer j1",
+      "oauth:bigmodel:access_token": "tok-bm",
+      "oauth:bigmodel:user_info": JSON.stringify({ id: "u7", email: "q@example.com" }),
+      [loc("bigmodel", "u7")]: JSON.stringify({ organizationId: "org7", projectId: "proj7", apiKeyId: "k7" }),
+      // another account's location is left alone
+      [loc("bigmodel", "u8")]: JSON.stringify({ organizationId: "org8", projectId: "proj8", apiKeyId: "k8" }),
+    },
+    { providerFamilyDomain: "bigmodel" },
+  )
+  const sent = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    sent.push([init.method ?? "GET", url, new Headers(init.headers ?? {}).get("authorization")])
+    if (url.includes("/api_keys/copy/k7")) return Response.json({ code: 200, data: { secretKey: "sec7" } })
+    if (url.includes("/api/biz/subscription/list")) return Response.json({ code: 200, data: [{ productName: "GLM Coding Pro", status: "VALID" }] })
+    if (url.includes("/zcode-plan/billing/balance")) return Response.json({ code: 0, data: { plans: [] } })
+    return new Response("{}", { status: 404 })
+  }
+  const hooks = await ZCodeAuthPlugin({ client: {} })
+  const m = hooks.auth.methods.find((x) => x.label === "ZCode app's sign-in")
+  const got = await (await m.authorize()).callback()
+  expect(got.type).toBe("success")
+  const auth = { ...got, type: "oauth" }
+  const s = await _internal.located(_internal.stateOf(auth))
+  expect(s).toMatchObject({ key: "k7.sec7", site: "bigmodel", base: "https://open.bigmodel.cn/api/anthropic" })
+  expect(sent[0]).toEqual(["GET", "https://bigmodel.cn/api/biz/v1/organization/org7/projects/proj7/api_keys/copy/k7", "tok-bm"])
+  // nothing is made
+  expect(sent.every(([method]) => method === "GET")).toBe(true)
+  _internal.routes.clear()
+  expect((await _internal.plansOf(s)).start).toBe(false)
+  expect(sent.map(([, u]) => u).join(" ")).not.toContain("k8")
+
+  // a location whose key is gone leaves the sign-in as it was
+  zcodeHas(
+    {
+      zcodejwttoken: "Bearer j1",
+      "oauth:zai:access_token": "tok-z",
+      "oauth:zai:user_info": JSON.stringify({ id: "u9", email: "z@example.com" }),
+      ["project-key-location:v1:" + encodeURIComponent(JSON.stringify(["https://evil.example", "zai", "u9", null, 1, "non-team"]))]: JSON.stringify({ organizationId: "o", projectId: "p", apiKeyId: "gone" }),
+    },
+  )
+  sent.length = 0
+  const z = await (await m.authorize()).callback()
+  const zs = await _internal.located(_internal.stateOf({ ...z, type: "oauth" }))
+  expect(zs.key).toBe("")
+  // asked at the site's own API, never the record's foreign origin, as a Bearer
+  expect(sent[0]).toEqual(["GET", "https://api.z.ai/api/biz/v1/organization/o/projects/p/api_keys/copy/gone", "Bearer tok-z"])
+})

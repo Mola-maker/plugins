@@ -18,7 +18,7 @@ afterEach(() => (globalThis.fetch = real))
 const ok = (data) => Response.json({ code: 200, success: true, data })
 
 // a BigModel account with its own Pro plan in 默认项目 and a seat on team t1
-function vendor({ seat = "VALID", teams = true } = {}) {
+function vendor({ seat = "VALID", teams = true, user = { email: "ada@example.com" } } = {}) {
   const seen = []
   globalThis.fetch = async (input, init = {}) => {
     const u = new URL(typeof input === "string" ? input : input.url)
@@ -28,7 +28,7 @@ function vendor({ seat = "VALID", teams = true } = {}) {
     seen.push({ method: init.method ?? "GET", path: u.pathname, org, proj })
     const p = u.pathname
     if (p === "/api/v1/oauth/cli/init") return ok({ flow_id: "f1", authorize_url: "https://open.bigmodel.cn/login", poll_interval_sec: 0, expires_at: 0 })
-    if (p === "/api/v1/oauth/cli/poll/f1") return ok({ status: "ready", bigmodel: { access_token: "bm-token" }, token: "", user: { email: "ada@example.com" } })
+    if (p === "/api/v1/oauth/cli/poll/f1") return ok({ status: "ready", bigmodel: { access_token: "bm-token" }, token: "", user })
     if (p === "/api/biz/customer/getCustomerInfo")
       return ok({
         organizations: [
@@ -104,4 +104,14 @@ test("the team sign-in asks which site, as the key sign-in does", async () => {
   const m = hooks.auth.methods.find((x) => x.label === "ZCode: a team's GLM Coding Plan")
   expect(m.type).toBe("oauth")
   expect(m.prompts.map((p) => [p.key, p.type, p.options.map((o) => o.value)])).toEqual([["site", "select", ["zai", "bigmodel"]]])
+})
+
+// wakkana on Discord (WorkBuddy's, the same here): the browser sign-in
+// keeps the account's user id beside its name, for magpie to tell two
+// accounts of one name apart by
+test("the plan sign-in keeps the account's user id", async () => {
+  vendor({ user: { name: "Ada", user_id: 42 } })
+  const r = await signIn("ZCode: BigModel (智谱) GLM Coding Plan")
+  expect(r.accountId).toBe("Ada")
+  expect(r.uid).toBe("42")
 })

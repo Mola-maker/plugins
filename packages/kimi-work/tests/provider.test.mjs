@@ -74,8 +74,33 @@ test('models come from Work; usage reports only the shared membership allowance'
 
 test('an upstream usage refusal does not incorrectly invalidate the desktop sign-in',async()=>{
   const p=I.createPlugin({readSession:()=>session,fetchImpl:async()=>new Response('{}',{status:403})});
-  try{await p.auth.usage(async()=>account);throw Error('expected upstream refusal');}
-  catch(error){expect(error.signIn).toBeUndefined();expect(error.message).toContain('403');}
+  const u=await p.auth.usage(async()=>account);
+  expect(u.signIn).toBe('kept');expect(u.windows).toEqual([]);expect(u.error).toContain('403');
+});
+
+// www.kimi.com's literal answer to a web token it no longer takes (10-25,
+// curl, signed out and with a stale token alike).
+const sessionExpired={"code":"unauthenticated","details":[{"type":"common.error.v1.ErrorDetail","value":"CGQSLgoFZW4tVVMSJVNlc3Npb24gZXhwaXJlZC4gUGxlYXNlIGxvZyBpbiBhZ2Fpbi4","debug":{"reason":"REASON_INVALID_AUTH_TOKEN","localizedMessage":{"locale":"en-US","message":"Session expired. Please log in again."}}}]};
+
+test('a stale web sign-in is said on the card and keeps the Work sign-in',async()=>{
+  const p=I.createPlugin({readSession:()=>session,fetchImpl:async()=>Response.json(sessionExpired,{status:401})});
+  const u=await p.auth.usage(async()=>account);
+  expect(u.windows).toEqual([]);expect(u.signIn).toBe('kept');
+  expect(u.error).toContain('Kimi 网页登录已过期');
+  // magpie's signInGone would mark the account signed out on these words
+  expect(u.error).not.toMatch(/sign-in has (expired|lapsed)|sign in again/i);
+  expect(u.error).not.toContain(session.webToken);
+});
+
+test('a balance with nothing used, its zero left out, reads 0%; no balance is said',async()=>{
+  let reply={subscriptionBalance:{expireTime:'2030-01-01T00:00:00Z'}};
+  const p=I.createPlugin({readSession:()=>session,fetchImpl:async()=>Response.json(reply)});
+  expect((await p.auth.usage(async()=>account)).windows).toEqual([{name:'会员共享额度',used:0}]);
+  reply={subscription_balance:{amount_used_ratio:0.5}};
+  expect((await p.auth.usage(async()=>account)).windows).toEqual([{name:'会员共享额度',used:50}]);
+  reply={overdrawn:false};
+  const u=await p.auth.usage(async()=>account);
+  expect(u.windows).toEqual([]);expect(u.error).toContain('subscriptionBalance');
 });
 
 test('the real redacted catalog and additional advertised reasoning levels are preserved',()=>{
@@ -200,4 +225,35 @@ test('the platform is the desktop\'s on macOS and Windows, and agent-gw gets non
   expect(I.workHeaders('d')['X-Msh-Platform']).toBe('kimi-code-cli');
   // The web menu, as a reply without the platform is, has no K3.1 Pro.
   expect(Object.keys(I.workConfigRows(webMenu))).toEqual(['k3-agent','k3-agent-swarm','k2d8-preview']);
+});
+
+// www.kimi.com's literal answer to a web sign-in it no longer takes (seen
+// 2026-10-24 with a token it can't verify): 401, Connect "unauthenticated".
+const staleToken={code:'unauthenticated',message:'invalid user token: token signature is invalid: signature is invalid',
+  details:[{type:'common.error.v1.ErrorDetail',value:'CGQSLgoFZW4tVVMSJVNlc3Npb24gZXhwaXJlZC4gUGxlYXNlIGxvZyBpbiBhZ2Fpbi4',debug:{reason:'REASON_INVALID_AUTH_TOKEN'}}]};
+test('a menu the web sign-in can\'t get is asked again without it, so K3.1 Pro is still listed, and the failure is logged',async()=>{
+  const seen=[],logged=[];const warn=console.warn;console.warn=(...x)=>logged.push(x.join(' '));
+  try {
+    for(const reply of [()=>Response.json(staleToken,{status:401}),()=>new Response('',{status:503}),()=>json({models:[]})]) {
+      seen.length=0;logged.length=0;
+      // Answers as www.kimi.com does: the sign-in refused, the menu given
+      // to the desktop without one.
+      const p=I.createPlugin({platform:'darwin',readSession:()=>session,fetchImpl:async(url,init)=>{
+        if(url!==I.CONFIG)return json(modelPayload);
+        seen.push(init.headers);
+        return init.headers.Authorization?reply():json(deskMenu);}});
+      const models=await p.provider.models({models:{}},{auth:account});
+      expect(Object.keys(models)).toEqual(['k3d1-agent','k2d8-preview','k3-agent']);
+      expect(models['k3d1-agent'].name).toBe('K3.1 Pro');
+      expect(seen.map(h=>h.Authorization)).toEqual(['Bearer '+session.webToken,undefined]);
+      expect(seen[1]).toMatchObject({'x-msh-platform':'mac','x-msh-version':'3.2.20'});
+      expect(logged.join('\n')).toContain('DescribeKimiWorkConfig');
+      expect(logged.join('\n')).not.toContain(session.webToken);
+    }
+    // A sign-in it takes is asked once, and nothing is logged.
+    seen.length=0;logged.length=0;
+    await I.createPlugin({platform:'darwin',readSession:()=>session,fetchImpl:async(url,init)=>{
+      if(url!==I.CONFIG)return json(modelPayload);seen.push(init.headers);return json(deskMenu);}}).provider.models({models:{}},{auth:account});
+    expect(seen.length).toBe(1);expect(logged).toEqual([]);
+  } finally {console.warn=warn;}
 });

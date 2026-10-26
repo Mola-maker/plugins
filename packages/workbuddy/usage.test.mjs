@@ -64,7 +64,7 @@ test("a free WorkBuddy AI account, at its own site and domain", async () => {
   const calls = serve({ "/billing/meter/get-user-resource-summary": () =>
     ok({ IsPaidUser: false, Packages: [{ CycleTotalCapacity: "1000", CycleUsedCapacity: "100" }] }) })
   const auth = { type: "oauth", access: "ai-access", expires: later(), uid: "ai2", domain: "www.codebuddy.ai" }
-  expect(await usageOf(WorkBuddyAIAuthPlugin, auth)).toEqual({ signIn: "kept", plan: "Free", windows: [{ name: "Credits", used: 10, display: "100 / 1000", amount: 100, limit: 1000, unit: "credits" }] })
+  expect(await usageOf(WorkBuddyAIAuthPlugin, auth)).toEqual({ signIn: "kept", plan: "Free plan", windows: [{ name: "Credits", used: 10, display: "100 / 1000", amount: 100, limit: 1000, unit: "credits" }] })
   expect(calls[0].url.origin).toBe("https://www.workbuddy.ai")
   expect(calls[0].headers.get("x-domain")).toBe("www.codebuddy.ai")
 })
@@ -74,7 +74,7 @@ test("counts and plans as Go says them", () => {
     .toEqual({ plan: "Team", windows: [{ name: "Credits", used: (100 * 438.88000002) / 3300, display: "438.88 / 3300", amount: 438.88000002, limit: 3300, unit: "credits" }] })
   // no capacity, no window
   expect(_internal.usageOf({ IsPaidUser: false, Packages: [{ CycleTotalCapacity: "", CycleUsedCapacity: null }] }, ""))
-    .toEqual({ plan: "Free", windows: [] })
+    .toEqual({ plan: "Free plan", windows: [] })
   expect(() => _internal.usageOf({ Packages: [{ CycleTotalCapacity: "lots" }] })).toThrow('strconv.ParseFloat: parsing "lots": invalid syntax')
 })
 
@@ -302,6 +302,50 @@ test("runsOutOf: soonest end of credits left, by the summary's packages, never t
   expect(_internal.runsOutOf(AI_SUMMARY, AI_FREE.Accounts, Date.parse("2026-11-01T00:00:00Z"))).toBeNull()
 })
 
+// 2026-10-26, a real WorkBuddy AI Pro account (ids left out): the summary
+// names its subscription, and the paid list has that package's cycle. With
+// no reset on the window, magpie's card said "Not used yet" beside 46%
+// (windy on Discord); WorkBuddy's own client says the plan refreshes at
+// the cycle's end.
+const LIVE_SUMMARY = { Packages: [
+  { PackageCode: "TCACA_code_002_AkiJS3ZHF5", CycleTotalCapacity: "1000", CycleRemainCapacity: "910.80000003", CycleUsedCapacity: "89.19999997", CycleFrozenCapacity: "0", CapacityUnit: "credit", TotalCount: 1 },
+  { PackageCode: "TCACA_code_037_WxOD3MpI2o", CycleTotalCapacity: "1000", CycleRemainCapacity: "1000", CycleUsedCapacity: "0", CycleFrozenCapacity: "0", CapacityUnit: "credits", TotalCount: 1 },
+], TotalCredits: "1910.80000003", SubscriptionPackageCode: "TCACA_code_002_AkiJS3ZHF5", SubscriptionPackageName: "Pro Monthly", IsPaidUser: true }
+const LIVE_PAID = { TotalCount: 1, Accounts: [
+  { PackageCode: "TCACA_code_002_AkiJS3ZHF5", PackageName: "Pro Plan Monthly Subscription", CapacityType: 2, CycleStartTime: "2026-09-29 00:40:53", CycleEndTime: "2026-10-29 00:40:52",
+    DeductionStartTime: 1790613653000, DeductionEndTime: 1793205652000, ExpiredTime: "", CycleCapacitySizePrecise: "1000", CycleCapacityRemainPrecise: "910.80000003", CycleCapacityUsedPrecise: "89.19999997", Status: 0 },
+] }
+const LIVE_FREE = { TotalCount: 1, Accounts: [
+  { PackageCode: "TCACA_code_037_WxOD3MpI2o", PackageName: "Plan Bonus Quota", CapacityType: 2, CycleStartTime: "2026-09-29 00:40:53", CycleEndTime: "2026-10-29 00:40:52",
+    DeductionStartTime: 1790613653000, DeductionEndTime: 1793205652000, ExpiredTime: "", CycleCapacitySizePrecise: "1000", CycleCapacityRemainPrecise: "1000", CycleCapacityUsedPrecise: "0", Status: 0 },
+] }
+
+test("used credits say when the plan's cycle starts again, as WorkBuddy's client does (windy on Discord)", async () => {
+  // the same lists ten years on, so the cycle is still to come
+  const on = (d) => ({ ...d, Accounts: d.Accounts.map((p) => ({ ...p, DeductionEndTime: p.DeductionEndTime + Date.UTC(2036, 9, 1) - Date.UTC(2026, 9, 1),
+    CycleStartTime: "2036" + p.CycleStartTime.slice(4), CycleEndTime: "2036" + p.CycleEndTime.slice(4) })) })
+  serve({
+    "/billing/meter/get-user-resource-summary": () => ok(LIVE_SUMMARY),
+    "/billing/meter/get-user-resource-paid-packages": () => ok(on(LIVE_PAID)),
+    "/billing/meter/get-user-resource-free-packages": () => ok(on(LIVE_FREE)),
+  })
+  const u = await usageOf(WorkBuddyAIAuthPlugin, { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u" })
+  const w = u.windows.find((x) => x.name === "Credits")
+  expect(w.amount).toBeCloseTo(89.2, 5)
+  expect(w.resetsAt).toBe("2036-10-28T16:40:52.000Z")
+  expect(w.span).toBe(30 * 86400 - 1)
+})
+
+test("cycleOf: the subscription's cycle end in UTC+8; none named, not listed or over is unknown", () => {
+  const now = Date.parse("2026-10-26T06:00:00Z")
+  expect(_internal.cycleOf(LIVE_SUMMARY, LIVE_PAID.Accounts, now)).toEqual({ resetsAt: "2026-10-28T16:40:52.000Z", span: 30 * 86400 - 1 })
+  expect(_internal.cycleOf({ ...LIVE_SUMMARY, SubscriptionPackageCode: "" }, LIVE_PAID.Accounts, now)).toBeNull()
+  expect(_internal.cycleOf(LIVE_SUMMARY, LIVE_FREE.Accounts, now)).toBeNull()
+  expect(_internal.cycleOf(LIVE_SUMMARY, LIVE_PAID.Accounts, Date.parse("2026-11-01T00:00:00Z"))).toBeNull()
+  // a start it can't read leaves the span out, the reset stays
+  expect(_internal.cycleOf(LIVE_SUMMARY, [{ ...LIVE_PAID.Accounts[0], CycleStartTime: "" }], now)).toEqual({ resetsAt: "2026-10-28T16:40:52.000Z" })
+})
+
 test("a detail list that can't be read leaves the card as it was", async () => {
   serve({
     "/billing/meter/get-user-resource-summary": () => ok(AI_SUMMARY),
@@ -364,7 +408,7 @@ test("a personal account with no credits isn't given the enterprise's, and its r
     "/billing/meter/get-enterprise-user-usage": () => new Response(PERSONAL_ENT, { status: 400 }),
   })
   const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u" }
-  expect(await usageOf(WorkBuddyAuthPlugin, auth)).toEqual({ signIn: "kept", plan: "Free", windows: [] })
+  expect(await usageOf(WorkBuddyAuthPlugin, auth)).toEqual({ signIn: "kept", plan: "Free plan", windows: [] })
 })
 
 test("a personal account with credits never asks the enterprise meter", async () => {
@@ -402,7 +446,7 @@ test("credits used up don't count the free models (plugins#138, hheei)", async (
   for (const plugin of [WorkBuddyAuthPlugin, WorkBuddyAIAuthPlugin]) {
     serve({ "/billing/meter/get-user-resource-summary": () => ok(SPENT), "/v3/config": FREE_CFG })
     const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u", domain: "" }
-    expect(await usageOf(plugin, auth)).toEqual({ signIn: "kept", plan: "Free", windows: [{
+    expect(await usageOf(plugin, auth)).toEqual({ signIn: "kept", plan: "Free plan", windows: [{
       name: "Credits", used: 100, display: "560 / 560", amount: 560, limit: 560, unit: "credits", notModels: ["deepseek-v4.1-flash"] }] })
   }
 })

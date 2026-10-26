@@ -320,15 +320,40 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
   };
   async function jsonRequest(url,token,body,signal,deviceId) {
     const response=await fetchImpl(url,{method:body===undefined?'GET':'POST',
-      headers:{Authorization:'Bearer '+token,...(url.startsWith(BASE)?workHeaders(deviceId):webHeaders(platform)),'Accept':'application/json',
+      headers:{...(token?{Authorization:'Bearer '+token}:{}),...(url.startsWith(BASE)?workHeaders(deviceId):webHeaders(platform)),'Accept':'application/json',
         ...(body===undefined?{}:{'Content-Type':'application/json','Connect-Protocol-Version':'1'})},
       ...(body===undefined?{}:{body:JSON.stringify(body)}),signal:signal||AbortSignal.timeout(15000),redirect:'error'});
-    if(response.status===401)throw expired();
-    if(!response.ok)throw Error('Kimi Work 服务暂不可用（HTTP '+response.status+'）。');
+    if(response.status===401)throw Object.assign(expired(),{status:401});
+    if(!response.ok)throw Object.assign(Error('Kimi Work 服务暂不可用（HTTP '+response.status+'）。'),{status:response.status});
     if(Number(response.headers.get('content-length')||0)>2*1024*1024)throw Error('Kimi Work 响应过大。');
     const text=await response.text();
     if(Buffer.byteLength(text)>2*1024*1024)throw Error('Kimi Work 响应过大。');
     try{return JSON.parse(text);}catch{throw Error('Kimi Work 响应格式无效。');}
+  }
+  // Work's menu, as the desktop asks it with its web sign-in. When that
+  // ask fails (the web sign-in in Kimi's file has gone stale, which
+  // www.kimi.com answers 401 "invalid user token"; any other status; a
+  // reply with no models), the menu is asked again with no sign-in, as the
+  // desktop asks it before one: www.kimi.com answers that with the same
+  // desktop menu (tests/fixtures/work-config.mac.json, K3.1 Pro first).
+  // Through 0.1.9 a failed ask was dropped without a word, so the list was
+  // /models' alone (k3-agent, k2d8-preview) and K3.1 Pro was missing with
+  // nothing in the log. Each failure is logged now, without the token.
+  async function menu(s) {
+    let why='no web sign-in';
+    if(s.webToken) {
+      try {
+        const rows=workConfigRows(await jsonRequest(CONFIG,s.webToken,{}));
+        if(Object.keys(rows).length)return rows;
+        why='a reply with no models';
+      } catch(error) {why=error?.status?'HTTP '+error.status:(error?.name==='TimeoutError'?'timed out':error?.cause?.code||error?.message||String(error));}
+    }
+    console.warn('kimi-work: DescribeKimiWorkConfig with the web sign-in failed ('+why+'); asking it without one');
+    try {return workConfigRows(await jsonRequest(CONFIG,'',{}));}
+    catch(error) {
+      console.warn('kimi-work: DescribeKimiWorkConfig without a sign-in failed ('+(error?.status?'HTTP '+error.status:error?.message||String(error))+'); listing /models alone');
+      throw error;
+    }
   }
   return {
     config:async cfg=>{
@@ -389,13 +414,29 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
           return response;
         },
       }),
+      // The allowance is read with Kimi's web sign-in (kimiWeb), not the
+      // Work one: the desktop rewrites it in its file only while it runs, so
+      // a closed desktop leaves a token www.kimi.com answers 401 "Session
+      // expired". Through 0.1.10 every failure was thrown, which magpie
+      // shows as a bare "暂时无法获取额度" with the reason only in a tooltip,
+      // and a 401 marked the Work account signed out though chat (Work's
+      // own token) still worked. A failure is now the card's error, and
+      // the Work sign-in is kept.
       usage:async getAuth=>{
         const s=current(await getAuth());
-        const j=await jsonRequest(MEMBER+'GetSubscriptionStats',s.webToken,{});
-        const b=j.subscriptionBalance,used=percent(b?.amountUsedRatio);
-        return {plan:'Kimi Work · 会员共享额度',windows:used===undefined?[]:[{
-          name:'会员共享额度',used,
-        }]};
+        const plan='Kimi Work · 会员共享额度';
+        let j;
+        try {j=await jsonRequest(MEMBER+'GetSubscriptionStats',s.webToken,{});}
+        catch(error) {
+          const why=error?.status===401?'Kimi 网页登录已过期，打开一次 Kimi 桌面版即可刷新额度（对话不受影响）'
+            :error?.name==='TimeoutError'?'读取 Kimi 会员额度超时':String(error?.message||error);
+          console.warn('kimi-work: GetSubscriptionStats failed ('+(error?.status?'HTTP '+error.status:why)+')');
+          return {plan,windows:[],error:why,signIn:'kept'};
+        }
+        // Connect JSON leaves a zero out: a balance with no ratio is 0% used.
+        const b=pick(j,'subscriptionBalance','subscription_balance'),used=isObj(b)?percent(pick(b,'amountUsedRatio','amount_used_ratio')??0):undefined;
+        if(used===undefined)return {plan,windows:[],error:'Kimi 会员额度回复里没有共享额度（subscriptionBalance）',signIn:'kept'};
+        return {plan,windows:[{name:'会员共享额度',used}]};
       },
     },
     provider:{id:ID,models:async(provider,{auth}={})=>{
@@ -404,7 +445,7 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch,platfo
       // Both lists, the desktop's menu first. Either one failing leaves the
       // other; both failing throws, so the last good list is kept.
       const [cfgList,gw]=await Promise.allSettled([
-        s.webToken?jsonRequest(CONFIG,s.webToken,{}).then(workConfigRows):Promise.reject(Error('no web token')),
+        menu(s),
         jsonRequest(BASE+'/models',s.workToken,undefined,undefined,s.deviceId).then(modelRows)]);
       const a=cfgList.status==='fulfilled'?cfgList.value:{},b=gw.status==='fulfilled'?gw.value:{};
       if(gw.status==='rejected'&&!Object.keys(a).length)throw gw.reason;

@@ -414,7 +414,10 @@ function goG(x) {
 
 // usageOf is the allowance Get-Usage-Limits tells, as magpie's built-in
 // said it: the account's email, the credits of each allowance, the month's and a free trial's
-// while it runs.
+// while it runs. Each window carries its count (amount, limit, unit), so
+// magpie can say what is left of it when the user shows what is left
+// (#408): display alone is the vendor's text, which magpie can't turn
+// round.
 function usageOf(l) {
   const at = (secs) => (secs > 0 ? new Date(Math.trunc(secs) * 1000).toISOString() : undefined)
   const count = (used, limit) => used.toFixed(2).replace(/0+$/, "").replace(/\.$/, "") + " / " + goG(limit)
@@ -424,13 +427,14 @@ function usageOf(l) {
     const t = u?.freeTrialInfo
     if (t && String(t.freeTrialStatus ?? "").toUpperCase() === "ACTIVE" && num(t.usageLimitWithPrecision) > 0) {
       const used = num(t.currentUsageWithPrecision), limit = num(t.usageLimitWithPrecision)
-      windows.push({ name: "Free trial", used: (100 * used) / limit, resetsAt: at(num(t.freeTrialExpiry)), display: count(used, limit) })
+      windows.push({ name: "Free trial", used: (100 * used) / limit, resetsAt: at(num(t.freeTrialExpiry)), display: count(used, limit),
+        amount: used, limit, unit: "credits" })
     }
     const used = num(u?.currentUsageWithPrecision), limit = num(u?.usageLimitWithPrecision)
     if (limit <= 0) continue
     const reset = num(u?.nextDateReset) || num(l?.nextDateReset)
     windows.push({ name: u?.displayNamePlural || u?.displayName || "Credits", used: (100 * used) / limit, resetsAt: at(reset),
-      display: count(used, limit), span: 30 * 24 * 3600 })
+      display: count(used, limit), amount: used, limit, unit: "credits", span: 30 * 24 * 3600 })
   }
   const email = l?.userInfo?.email
   return { plan: planName(l?.subscriptionInfo?.subscriptionTitle), ...(typeof email === "string" && email ? { user: email } : {}), windows }

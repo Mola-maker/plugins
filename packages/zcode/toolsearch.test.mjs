@@ -120,6 +120,10 @@ test("a request without Claude Code's search goes as the agent sent it", async (
   body.tools = body.tools.filter((t) => t.name !== "ToolSearch")
   body.messages = body.messages.slice(0, 2)
   const { sent } = await send(coding, body)
+  // but for the device ZCode names on every request (#387)
+  expect(typeof sent.metadata?.user_id).toBe("string")
+  delete sent.metadata.user_id
+  if (!Object.keys(sent.metadata).length && !body.metadata) delete sent.metadata
   expect(sent).toEqual(body)
 })
 

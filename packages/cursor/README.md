@@ -109,6 +109,13 @@ A step's calls must all arrive within 30 seconds of each other: Cursor sends
 each one once the model has written it, so a step of many long calls can take
 longer than that in all (#155).
 
+A Run Cursor stops answering ends with a 502 that says so, retained or
+stateless: 60 seconds with no message at all, or 4 minutes with only
+Cursor's heartbeats (yetone/magpie#2672, where a Run sent some thinking and
+then nothing, and the reply waited until the agent gave up after 5 minutes).
+Only time spent waiting on Cursor counts: a retained Run waiting for the
+caller's tool results is bounded by the 120 seconds above instead.
+
 Cursor's count of a step's tool calls includes calls the plugin answers itself:
 a tool the request doesn't have is refused to the model, and Cursor's own
 `get_mcp_tools` is answered with the request's tools. The step's calls are the
@@ -146,7 +153,10 @@ as prior usage. Stateless Runs otherwise keep the dashboard accounting above.
 `X-Magpie-Cursor-Continuity` identifies `same-run` or `stateless`, with the fallback
 reason where available. A missing native batch count can retry stateless once
 before any output is exposed or native result submitted; progressive output is
-kept and its later errors are surfaced.
+kept and its later errors are surfaced. A step's declared tool batch waits 30
+seconds from Cursor's latest call, count, text or heartbeat, so one long call
+written under heartbeats is not cut off; the failure says how many of the
+declared calls came.
 
 The existing request builder and model selection remain in use, including the
 legacy `thinking=false` mapping for explicit `none`/`off`. Retention adds no

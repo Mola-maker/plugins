@@ -17,7 +17,8 @@
 // published and the plugin can depend on a pinned version.
 //
 // Environment:
-//   MAGPIE_LAYERFS_BACKEND  auto (default) | sim; native is refused
+//   MAGPIE_LAYERFS_BACKEND  auto (default) | sim — "native" is an
+//                           explicit error in this package (above)
 //   MAGPIE_LAYERFS_HOME     state root (default ~/.layerfs-tools; see
 //                           defaultRoot below)
 import { spawn } from "node:child_process"
