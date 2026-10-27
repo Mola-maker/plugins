@@ -24,9 +24,13 @@ test("the package declares the page magpie shows", () => {
   const html = read("index.html")
   expect(html).toContain("_magpie/bridge.js") // the host serves the bridge beside every page
   expect(html).toContain('src="trajectory.js"')
-  expect(html).not.toContain("trajectory-live.js") // no runtime live file: the tools never write into the install folder
-  // the page sandbox forbids inline scripts and any fetch; the only
-  // data script is the bundled sample trajectory shipped with the page
+  // the live file is the data channel again, but OUT of the install: the
+  // tools write it in the plugin's data folder and the installed page/
+  // is a link to that folder (page-data.mjs), so nothing here is written
+  // at runtime either. The script tag is what 0.8.0 shipped.
+  expect(html).toContain('<script src="trajectory-live.js"></script>')
+  // the page sandbox forbids inline scripts and any fetch; the data
+  // scripts are the bundled sample and the live recording beside it
   expect(html).not.toMatch(/<script>(?!\s*src)/)
 })
 

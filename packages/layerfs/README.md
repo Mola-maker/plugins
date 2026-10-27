@@ -165,21 +165,44 @@ draws its own outline and fills in, a publish pops its Layer badge
 easing; with reduced motion preferred, the page simply shows the
 finished picture, every icon fully drawn.
 
-A magpie page cannot read plugin-private data: its sandbox forbids
-fetch, and the bridge's reads are a fixed host list (`usage:summary`,
-`providers:list`) with no entry a plugin can serve its own data
-through. So the page animates the sample bundled with it —
-`page/trajectory.js`, a labeled recording from the benchmark scenario
-(one project, six agents, three checkpoints each), a package asset
-that nothing rewrites at runtime. The trajectory itself is computed
-on demand from the store's records whenever it is asked for
-(`backend.trajectory()`; `tools/gen-trajectory.mjs` uses it to make
-the sample). No recording file is maintained per tool call: an
+A magpie page cannot fetch, and the bridge's reads are a fixed host
+list (`usage:summary`, `providers:list`) with no entry a plugin can
+serve its own data through — but magpie serves a page's files from the
+plugin's folder as they sit on disk, per request. So the tools keep a
+live recording the page loads as a script beside the bundled sample:
+
+- **The live data lives in the plugin's data directory** — beside the
+  store (`MAGPIE_LAYERFS_DATA_DIR` moves it), never inside the install.
+  On the first `LayerfsTools()` of a host start, an idempotent
+  `ensurePageData` (`page-data.mjs`) copies the bundled page files
+  there once and points the installed package's `page/` at that folder
+  — a junction on Windows, a symlink elsewhere — so the host's
+  per-request disk serving reads through it and the tools' live writes
+  land outside the install. A development checkout (a `.git` at or
+  above the package) is never swapped, only seeded; an install whose
+  page folder cannot be swapped (read-only, a filesystem without
+  junctions) falls back to the bundled sample, silently.
+- **After every mutating call the tools rewrite `trajectory-live.js`**
+  from `backend.trajectory()` — tmp-then-renamed, debounced, off the
+  tool calls' path, errors swallowed (the page keeps its last file).
+  The page loads it after the bundled sample and prefers it; an empty
+  store writes an empty live file, and the page shows its honest empty
+  state instead of the demo. The first start of a host whose store
+  already holds a project writes it once, so the page is live from the
+  first open, not from the first tool call.
+- **An Agent activity table** under the replay lists every recorded
+  tool call — the calling agent, the tool, the project, the branch and
+  the time, newest last. The bundled sample carries no events, so the
+  section hides itself there; all four locales carry the strings.
+
+`backend.trajectory()` itself is computed on demand from the store's
+records whenever it is asked for (`tools/gen-trajectory.mjs` uses it
+to make the sample). No recording file is maintained in the store: an
 earlier version refreshed one in the store after every call, which
 cost a branch-chain walk per call — growing with the project's
-history — for a file the page cannot read, so the refresh was
-removed in 0.7.1. The page declares no `magpie.read` permissions,
-and its test asserts it asks for none.
+history — for a file the page cannot read, so the refresh was removed
+in 0.7.1. The page declares no `magpie.read` permissions, and its
+test asserts it asks for none.
 
 ## Develop
 
@@ -194,6 +217,37 @@ node tools/gen-trajectory.mjs   # regenerate the page's bundled sample trajector
 
 Zero runtime dependencies; the arguments are JSON Schema, like the other
 tools packages. MIT.
+
+## Changes in 0.10.0
+
+The page's live channel comes back, out of the plugin's own folder. The
+0.9.0 review was right that nothing may write into the installed
+package's folder — an update replaces that folder, two hosts with one
+install race on the same file, and an install can be read-only — but its
+conclusion, a page that only ever shows the bundled sample, threw away
+the real trajectory every desktop had been watching. This version
+answers both sides at once:
+
+- **The live data lives in the plugin's data directory** — beside the
+  store (`MAGPIE_LAYERFS_DATA_DIR` moves it), and the installed `page/`
+  is pointed at it once, by an idempotent swap (a junction on Windows,
+  a symlink elsewhere) that every failure path undoes into the bundled
+  sample. Nothing ever writes into the install itself.
+- **The page gains an Agent activity table** — every recorded tool
+  call, with the calling agent, the tool, the project, the branch and
+  the time — so each round's work is visible per agent, not only as
+  commits on a graph.
+- **The first start of a host whose store already holds a project
+  writes the live file once** (two read-only gates: a projects folder
+  that holds entries, and a non-empty answer from the backend that
+  will serve the calls), so an upgrade shows the user's real work on
+  the first open instead of the sample until the next tool call.
+- `ensurePageData` lives in `page-data.mjs`, not the entry module: the
+  plugin host takes every function the entry exports for an OpenCode
+  plugin factory and calls it at load, so the entry exports
+  `LayerfsTools` alone (the standalone repo shipped 0.10.0 with the
+  helper in the entry and the whole plugin failed to load — this is
+  that lesson, applied here from the start).
 
 ## Changes in 0.9.0
 

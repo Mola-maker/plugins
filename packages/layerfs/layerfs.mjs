@@ -353,11 +353,16 @@ export function defaultRoot(home = homedir()) {
 
 // ---- sim backend ---------------------------------------------------------------
 
+// The store's root: MAGPIE_LAYERFS_HOME moves it, otherwise defaultRoot's
+// move-once rule decides (~/.layerfs-tools). The one copy of this rule —
+// the backend and the page's startup check read it here.
+export const storeHome = () => process.env.MAGPIE_LAYERFS_HOME || defaultRoot()
+
 export class SimBackend {
   kind = "sim"
 
   constructor(root) {
-    this.root = root || process.env.MAGPIE_LAYERFS_HOME || defaultRoot()
+    this.root = root || storeHome()
     this.objectsDir = join(this.root, "store", "objects")
     this.projectsDir = join(this.root, "projects")
     this.workspacesDir = join(this.root, "workspaces")

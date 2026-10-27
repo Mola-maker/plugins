@@ -6,6 +6,7 @@
   "files": [
     "index.mjs",
     "layerfs.mjs",
+    "page-data.mjs",
     "page",
     "README.md"
   ],
@@ -45,5 +46,5 @@
     "directory": "packages/layerfs"
   },
   "type": "module",
-  "version": "0.9.0"
+  "version": "0.10.0"
 }

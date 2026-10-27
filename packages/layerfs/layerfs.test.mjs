@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
   rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs"
 import { homedir, tmpdir } from "node:os"
@@ -48,6 +48,11 @@ async function simTools(opts = { exec: true }) {
   process.env.MAGPIE_LAYERFS_HOME = home
   process.env.MAGPIE_LAYERFS_BACKEND = "sim"
   delete process.env.MAGPIE_LAYERFS_EXEC
+  delete process.env.MAGPIE_LAYERFS_EXEC2
+  delete process.env.MAGPIE_LAYERFS_INSTALL_DIR
+  delete process.env.MAGPIE_LAYERFS_DATA_DIR
+  const page = mkTmp("layerfs-page-")
+  process.env.MAGPIE_LAYERFS_PAGE_DIR = page
   const src = fixture()
   // ctx.directory is magpie's CONFIG directory in the real host — the
   // harness models it as its own temp dir, never the source
@@ -57,7 +62,24 @@ async function simTools(opts = { exec: true }) {
   const call = (name, args) => tool[name].execute(
     name === "provision" && args.source === undefined ? { ...args, source: src } : args,
     { agent: "test", abort: AbortSignal.timeout(5000) })
-  return { call, home, src, tool }
+  return { call, home, src, tool, page }
+}
+
+// A page file copied into a staged install or an expected folder.
+const copyFileSyncSafe = (f, from, to) => copyFileSync(join(from, f), join(to, f))
+
+async function liveData(page, want, ms = 8000) {  const live = join(page, "trajectory-live.js")
+  const deadline = Date.now() + ms
+  for (;;) {
+    if (existsSync(live)) {
+      try {
+        const data = JSON.parse(readFileSync(live, "utf8").replace(/^globalThis\.LayerfsTrajectory = |;\n$/g, ""))
+        if (want(data)) return data
+      } catch { /* a mid-rename read, or an earlier state */ }
+    }
+    if (Date.now() > deadline) throw new Error("live trajectory never held the expected state")
+    await new Promise((r) => setTimeout(r, 50))
+  }
 }
 
 test("gives eight tools, each with a JSON Schema and an execute", async () => {
@@ -616,4 +638,140 @@ test("#360: a legacy root the user made a link is used where it is", () => {
   symlinkSync(elsewhere, join(home, LEGACY_ROOT), "dir")
   expect(defaultRoot(home)).toBe(join(home, LEGACY_ROOT))
   expect(existsSync(join(home, DEFAULT_ROOT))).toBe(false)
+})
+
+// ---- 0.10.0: the live data channel lives in the plugin's data directory ----
+// The 0.9.0 review holds: nothing writes into the installed plugin's own
+// folder. The tools keep the live trajectory in the plugin's data
+// directory (MAGPIE_LAYERFS_DATA_DIR, default beside the store root) and
+// point the installed page's folder at it — a junction on Windows, a
+// symlink elsewhere — swapped in once per install (an idempotent
+// ensurePageData, off the tool calls' path). MAGPIE_LAYERFS_PAGE_DIR
+// still moves the folder the tests point at.
+
+test("0.10.0: the live trajectory is written to the data directory, never the install folder", async () => {
+  const home = mkTmp("layerfs-home-")
+  const install = mkTmp("layerfs-install-") // models the installed package
+  const data = join(mkTmp("layerfs-data-"), "page-data")
+  process.env.MAGPIE_LAYERFS_HOME = home
+  process.env.MAGPIE_LAYERFS_BACKEND = "sim"
+  delete process.env.MAGPIE_LAYERFS_PAGE_DIR
+  process.env.MAGPIE_LAYERFS_DATA_DIR = data
+  // an installed-looking page folder: the bundled sample files. The
+  // install is wired in explicitly — without it the checkout guard
+  // leaves this fake install untouched and the assertions are vacuous.
+  mkdirSync(join(install, "page"), { recursive: true })
+  for (const f of ["index.html", "trajectory.js"])
+    copyFileSyncSafe(f, join(import.meta.dir, "page"), join(install, "page"))
+  process.env.MAGPIE_LAYERFS_INSTALL_DIR = install
+  const { tool } = await LayerfsTools({ directory: mkTmp("magpie-config-") }, {})
+  await tool.provision.execute({ project: "website", source: fixture() }, { agent: "r4", abort: AbortSignal.timeout(5000) })
+  // the ensure step laid, the install's page IS the data dir: the live
+  // file read through the link
+  const d = await liveData(data, (x) => !!x.projects.find((p) => p.name === "website"))
+  expect(d.projects.at(-1).name).toBe("website")
+  // nothing was written INTO the install: the page folder holds only the
+  // bundled files (as a junction it serves the data dir, never gains a
+  // live file of its own; a failed swap keeps the real folder below)
+  const pageSt = lstatSync(join(install, "page"))
+  if (!pageSt.isSymbolicLink())
+    expect(existsSync(join(install, "page", "trajectory-live.js"))).toBe(false)
+  // the shipped sample file inside the install is byte-identical to the
+  // repo's (the swap must not rewrite bundled files)
+  expect(readFileSync(join(install, "page", "trajectory.js"), "utf8")).toBe(
+    readFileSync(join(import.meta.dir, "page", "trajectory.js"), "utf8"))
+}, 30000)
+
+test("0.10.0: ensurePageData points the install's page folder at the data directory and serves every file", async () => {
+  const home = mkTmp("layerfs-home-")
+  const install = mkTmp("layerfs-install-")
+  const data = mkTmp("layerfs-data-")
+  process.env.MAGPIE_LAYERFS_HOME = home
+  process.env.MAGPIE_LAYERFS_BACKEND = "sim"
+  delete process.env.MAGPIE_LAYERFS_PAGE_DIR
+  process.env.MAGPIE_LAYERFS_DATA_DIR = data
+  // stage an installed-looking plugin: page/ beside index.mjs
+  mkdirSync(join(install, "page"), { recursive: true })
+  for (const f of readdirSync(join(import.meta.dir, "page")))
+    if (f !== "trajectory-live.js") copyFileSyncSafe(f, join(import.meta.dir, "page"), join(install, "page"))
+  // run the ensure step the way the host's first LayerfsTools() does
+  const { ensurePageData } = await import("./page-data.mjs")
+  const served = await ensurePageData(install)
+  expect(served).toBe(data)
+  // every bundled page file is reachable through the junction, byte-identical
+  for (const f of readdirSync(join(import.meta.dir, "page"))) {
+    if (f === "trajectory-live.js") continue
+    expect(existsSync(join(served, f))).toBe(true)
+    expect(readFileSync(join(served, f), "utf8")).toBe(readFileSync(join(import.meta.dir, "page", f), "utf8"))
+  }
+  // idempotent: a second call is a no-op
+  const st = lstatSync(served)
+  expect(await ensurePageData(install)).toBe(served)
+  expect(lstatSync(served).ino).toBe(st.ino)
+  // the page folder of the install IS the data dir now (readable through both)
+  expect(existsSync(join(install, "page", "trajectory.js"))).toBe(true)
+}, 30000)
+
+test("0.10.0: the page's live file carries per-agent tool-call events", async () => {
+  const { call, page } = await simTools()
+  await call("provision", { project: "website" })
+  await call("fork", { project: "website", branch: "claude", from: "main" })
+  const ws = await call("provision", { project: "website", branch: "claude" })
+  writeFileSync(join(ws.path, "x.txt"), "x\n")
+  await call("checkpoint", { project: "website", branch: "claude", message: "agent work" })
+  const data = await liveData(page, (d) => (d.events ?? []).some((e) => e.kind === "checkpoint" && e.agent === "test"))
+  // each event names the calling agent, the tool kind, project, branch and time
+  const e = data.events.filter((x) => x.kind === "checkpoint").at(-1)
+  expect(e.agent).toBe("test")
+  expect(e.project).toBe("website")
+  expect(e.branch).toBe("claude")
+  expect(typeof e.t).toBe("string")
+  // provision events carry the workspace path
+  const p = data.events.find((x) => x.kind === "provision")
+  expect(p.path).toContain("website")
+})
+
+test("0.10.0: the startup write is gated on real projects — empty or foreign folders write nothing", async () => {
+  const home = mkTmp("layerfs-home-")
+  const page = mkTmp("layerfs-page-")
+  process.env.MAGPIE_LAYERFS_HOME = home
+  process.env.MAGPIE_LAYERFS_BACKEND = "sim"
+  process.env.MAGPIE_LAYERFS_PAGE_DIR = page
+  delete process.env.MAGPIE_LAYERFS_INSTALL_DIR
+  delete process.env.MAGPIE_LAYERFS_DATA_DIR
+  // (a) a projects folder holding nothing: no write, and the backend is
+  // never built — its constructor is what creates the rest of the store
+  mkdirSync(join(home, "projects"))
+  const { LayerfsTools: Empty } = await import("./index.mjs?startup-empty")
+  await Empty({ directory: mkTmp("magpie-config-") }, {})
+  await new Promise((r) => setTimeout(r, 300))
+  expect(existsSync(join(page, "trajectory-live.js"))).toBe(false)
+  expect(existsSync(join(home, "store"))).toBe(false)
+  // (b) an entry that is no project: the backend's own answer decides, so
+  // the page keeps its sample instead of an empty picture
+  writeFileSync(join(home, "projects", "not-a-project.txt"), "x")
+  const { LayerfsTools: Foreign } = await import("./index.mjs?startup-foreign")
+  await Foreign({ directory: mkTmp("magpie-config-") }, {})
+  await new Promise((r) => setTimeout(r, 300))
+  expect(existsSync(join(page, "trajectory-live.js"))).toBe(false)
+})
+
+test("0.10.0: a development checkout is never swapped — only the install is", async () => {
+  const home = mkTmp("layerfs-home-")
+  const data = mkTmp("layerfs-data-")
+  process.env.MAGPIE_LAYERFS_HOME = home
+  process.env.MAGPIE_LAYERFS_BACKEND = "sim"
+  delete process.env.MAGPIE_LAYERFS_PAGE_DIR
+  delete process.env.MAGPIE_LAYERFS_INSTALL_DIR
+  process.env.MAGPIE_LAYERFS_DATA_DIR = data
+  const { LayerfsTools: FreshTools } = await import("./index.mjs?checkout-guard")
+  await FreshTools({ directory: mkTmp("magpie-config-") }, {})
+  await new Promise((r) => setTimeout(r, 200)) // the ensure is off the calls' path
+  // this file's own directory is the checkout: its page/ is still a real folder
+  const st = lstatSync(join(import.meta.dir, "page"))
+  expect(st.isSymbolicLink()).toBe(false)
+  expect(st.isDirectory()).toBe(true)
+  // and the data copy was seeded anyway (from the checkout's own page/)
+  expect(existsSync(join(data, "app.js"))).toBe(true)
+  expect(existsSync(join(data, "index.html"))).toBe(true)
 })
