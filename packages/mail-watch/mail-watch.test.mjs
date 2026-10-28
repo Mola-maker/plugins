@@ -14,9 +14,16 @@ const dir = mkdtempSync(join(tmpdir(), "mail-watch-test-"))
 process.env.MAGPIE_CONFIG_DIR = dir
 mkdirSync(join(dir, "magpie"), { recursive: true })
 
+// the temp dir serves every describe block; it goes when the file's tests
+// are all done, not when the first block's are
+afterAll(() => {
+  rmSync(dir, { recursive: true, force: true })
+})
+
 const watch = await import("./watch.js")
 const { fill, message, renderHtml, DEFAULT_HTML } = await import("./template.js")
 const { send, resolveSmtp, PRESETS } = await import("./smtp.js")
+const { readDigest, baselineDigest } = await import("./digest.js")
 
 // ---- the fake SMTP servers ---------------------------------------------
 // Two shapes, matching what the client speaks:
@@ -265,10 +272,6 @@ describe("watch", () => {
     writeFileSync(usage, "")
   })
 
-  afterAll(() => {
-    rmSync(dir, { recursive: true, force: true })
-  })
-
   const opts = (over = {}) => ({ watch: { errors: true, ...over }, cooldown: { error: 0, quota: 0 } })
 
   test("first init takes the log's size as its start, then sees new rows", () => {
@@ -402,5 +405,65 @@ describe("watch", () => {
     watch.save()
     expect(existsSync(state + ".tmp")).toBe(false)
     expect(existsSync(state)).toBe(true)
+  })
+})
+
+// ---- digest ----------------------------------------------------------------
+describe("digest", () => {
+  const usage = join(dir, "magpie", "usage.jsonl")
+  const state = join(dir, "magpie", "mail-watch-state.json")
+
+  test("readDigest aggregates sessions, agents, providers, models, tokens", () => {
+    writeFileSync(usage, "")
+    watch.forTests(null)
+    watch.init()
+    watch.forTests({ offset: 0, sent: {} })
+    // the digest cursor starts independent of the alert offset
+    baselineDigest()
+    const rows = [
+      { session: "aaaaaaaa-1111", agent: "claude", provider: "p1", model: "m1", status: 200, credits: 0.5, in: 100, out: 50 },
+      { session: "aaaaaaaa-1111", agent: "claude", provider: "p1", model: "m2", status: 200, credits: 0.25, in: 80, out: 30 },
+      { session: "bbbbbbbb-2222", agent: "node", provider: "p2", model: "m1", status: 502, credits: 0, in: 10, out: 0 },
+    ]
+    writeFileSync(usage, rows.map((r) => JSON.stringify(r)).join("\n") + "\n")
+    const { digest } = readDigest({})
+    expect(digest.rows).toBe(3)
+    expect(digest.ok).toBe(2)
+    expect(digest.failed).toBe(1)
+    expect(digest.credits).toBeCloseTo(0.75)
+    expect(digest.tokensIn).toBe(190)
+    expect(digest.tokensOut).toBe(80)
+    expect(digest.agents).toEqual({ claude: 2, node: 1 })
+    expect(digest.providers).toEqual({ p1: 2, p2: 1 })
+    expect(digest.models).toEqual({ m1: 2, m2: 1 })
+    expect(Object.keys(digest.sessions).sort()).toEqual(["aaaaaaaa", "bbbbbbbb"])
+    expect(digest.sessions["aaaaaaaa"]).toEqual({ rows: 2, agents: { claude: 2 } })
+    // the cursor moved: a second read sees nothing
+    expect(readDigest({}).digest.rows).toBe(0)
+  })
+
+  test("baselineDigest plants the log's end; later rows land in the window", () => {
+    writeFileSync(usage, JSON.stringify({ session: "cccccccc-3333", agent: "claude", provider: "p", model: "m", status: 200 }) + "\n")
+    // state already has a digestOffset from the previous test — reset it
+    const raw = JSON.parse(readFileSync(state, "utf8"))
+    delete raw.digestOffset
+    writeFileSync(state, JSON.stringify(raw))
+    baselineDigest()
+    const st = JSON.parse(readFileSync(state, "utf8"))
+    const before = st.digestOffset
+    expect(before).toBeGreaterThan(0)
+    // a new row arrives; the digest sees exactly it
+    const row = JSON.stringify({ session: "dddddddd-4444", agent: "node", provider: "p", model: "m", status: 200 }) + "\n"
+    writeFileSync(usage, readFileSync(usage, "utf8") + row)
+    const { digest } = readDigest({})
+    expect(digest.rows).toBe(1)
+    expect(Object.keys(digest.sessions)).toEqual(["dddddddd"])
+  })
+
+  test("a log cut shorter than the digest cursor reads nothing", () => {
+    writeFileSync(usage, "x")
+    const { digest } = readDigest({})
+    expect(digest.rows).toBe(0)
+    writeFileSync(usage, "")
   })
 })

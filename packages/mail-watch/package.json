@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Email alerts from the gateway: provider errors and exhausted quotas, with your own recipients, templates and watch list",
   "type": "module",
-  "files": ["mail-watch.hooks.js", "smtp.js", "watch.js", "template.js", "README.md"],
+  "files": ["mail-watch.hooks.js", "smtp.js", "watch.js", "digest.js", "template.js", "README.md"],
   "keywords": ["magpie", "magpie-hooks", "mail", "smtp", "alerts", "quota", "errors"],
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/magpie-community/plugins.git", "directory": "packages/mail-watch" },
@@ -14,6 +14,7 @@
       "to": ["me@example.com"],
       "watch": { "errors": true, "quotaExhausted": true, "quotaLow": false, "quotaLowPct": 90, "providers": [] },
       "cooldownMinutes": { "error": 10, "quota": 240 },
+      "report": { "hours": 6 },
       "template": {
         "subject": "[magpie] {{kind}} · {{provider}}{{window}}",
         "body": "What: {{kind}}\nProvider: {{provider}}{{account}}\n{{modelLine}}{{windowLine}}When: {{time}}\n\n{{detail}}"
