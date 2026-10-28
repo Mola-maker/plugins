@@ -15,8 +15,8 @@ process.env.MAGPIE_CONFIG_DIR = dir
 mkdirSync(join(dir, "magpie"), { recursive: true })
 
 const watch = await import("./watch.js")
-const { fill, message } = await import("./template.js")
-const { send } = await import("./smtp.js")
+const { fill, message, renderHtml, DEFAULT_HTML } = await import("./template.js")
+const { send, resolveSmtp, PRESETS } = await import("./smtp.js")
 
 // ---- the fake SMTP servers ---------------------------------------------
 // Two shapes, matching what the client speaks:
@@ -162,6 +162,42 @@ describe("template", () => {
     const m = message({ from: 'bad\r\nBcc: x@y.z <a@b.c>', to: ["t@x.y"], subject: "s", body: "x" })
     expect(m.split("\r\n")[0]).toBe('From: "bad Bcc: x@y.z" <a@b.c>')
     for (const line of m.split("\r\n")) expect(line.startsWith("Bcc:")).toBe(false)
+  })
+
+  test("message with html is multipart/alternative and both parts decode", () => {
+    const m = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "plain", html: "<p>rich</p>" })
+    expect(m).toContain('Content-Type: multipart/alternative; boundary="')
+    const boundary = /boundary="([^"]+)"/.exec(m)[1]
+    expect(m).toContain(`--${boundary}`)
+    expect(m.endsWith(`--${boundary}--\r\n\r\n`)).toBe(true)
+    // the plain part decodes to the text, the html part to the layout
+    const parts = m.split(`--${boundary}`).slice(1, -1)
+    const plain = Buffer.from(parts[0].split("\r\n\r\n")[1].replace(/\r\n/g, ""), "base64").toString("utf8")
+    const rich = Buffer.from(parts[1].split("\r\n\r\n")[1].replace(/\r\n/g, ""), "base64").toString("utf8")
+    expect(plain).toBe("plain")
+    expect(rich).toBe("<p>rich</p>")
+  })
+
+  test("renderHtml escapes vars into the user's layout and fills the default card", () => {
+    // an error's words stay text in the user's own page
+    const out = renderHtml("<b>{{err}}</b>", { err: "<script>alert(1)</script>", provider: "p", time: "t" })
+    expect(out).toContain("&lt;script&gt;")
+    expect(out).not.toContain("<script>")
+    // the default card fills every slot and leaves no skeleton rows
+    const card = renderHtml("", { kind: "error", provider: "p1", account: "", model: "m1", agent: "a1", window: "", used: "", time: "t", detail: "boom" })
+    expect(card).toContain("p1")
+    expect(card).toContain("m1")
+    expect(card).not.toContain("{{modelRow}}")
+    expect(card).not.toContain("{{windowRow}}")
+  })
+
+  test("resolveSmtp applies a preset under explicit options", () => {
+    expect(resolveSmtp({ preset: "qq", user: "u" })).toEqual({ host: "smtp.qq.com", port: 465, secure: true })
+    expect(resolveSmtp({ preset: "GMAIL" })).toEqual({ host: "smtp.gmail.com", port: 465, secure: true })
+    // a hand-set host and port win; an unknown preset is ignored
+    expect(resolveSmtp({ preset: "qq", host: "relay.lan", port: 2525 })).toEqual({ host: "relay.lan", port: 2525, secure: true })
+    expect(resolveSmtp({ preset: "nope", host: "relay.lan" })).toEqual({ host: "relay.lan", port: 587, secure: false })
+    expect(Object.keys(PRESETS)).toContain("163")
   })
 })
 

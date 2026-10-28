@@ -24,13 +24,38 @@
 
 import net from "node:net"
 
+// PRESETS are the mailhosts people actually forward mail through, so the
+// options can just name one: host, port and TLS come from the preset and
+// the user adds their address and an app password (QQ/163/126 call it
+// 授权码, Gmail an app password). All of these speak TLS from the first
+// byte on 465 — the transport this client speaks.
+export const PRESETS = {
+  qq: { host: "smtp.qq.com", port: 465, secure: true },
+  "163": { host: "smtp.163.com", port: 465, secure: true },
+  "126": { host: "smtp.126.com", port: 465, secure: true },
+  gmail: { host: "smtp.gmail.com", port: 465, secure: true },
+  zoho: { host: "smtp.zoho.com", port: 465, secure: true },
+  yahoo: { host: "smtp.mail.yahoo.com", port: 465, secure: true },
+}
+
+// resolveSmtp applies a preset under the explicit options: a host given by
+// hand wins, an unset secure/port takes the preset's, an unknown preset is
+// ignored (and a missing host then fails as before).
+export function resolveSmtp(cfg) {
+  const preset = PRESETS[String(cfg.preset ?? "").toLowerCase()]
+  const host = cfg.host ?? preset?.host
+  const secure = cfg.secure ?? preset?.secure ?? false
+  const port = Number(cfg.port) || preset?.port || (secure ? 465 : 587)
+  return { host: host === undefined ? undefined : String(host), port, secure }
+}
+
 // send is one mail. host, port, user, pass and from come from the options;
 // to is an array of addresses; body is the RFC 5322 text template.message
 // made.
 export async function send(cfg, to, body, { timeoutMs = 30000 } = {}) {
-  const port = Number(cfg.port) || (cfg.secure ? 465 : 587)
+  const { host, port, secure } = resolveSmtp(cfg)
+  if (!host) throw new Error(`smtp.host is required (or set smtp.preset to one of: ${Object.keys(PRESETS).join(", ")})`)
   const verify = cfg.insecure !== true
-  const host = String(cfg.host)
   const name = net.isIP(host) ? undefined : host
   // The connection as one object: connect makes it, and every reader below
   // reads through it. next() arms a waiter the data/error handlers fire;
@@ -113,8 +138,7 @@ export async function send(cfg, to, body, { timeoutMs = 30000 } = {}) {
     if (!ehlo.startsWith("250")) throw new Error(ehlo)
     if (!cfg.secure && cfg.user) {
       throw new Error("a plain connection sends the password in cleartext; set \"secure\": true (TLS, port 465) or drop the user to use an open relay")
-    }
-    if (cfg.user) {
+    }    if (cfg.user) {
       const tok = Buffer.from(`\0${cfg.user}\0${cfg.pass ?? ""}`, "utf8").toString("base64")
       const auth = await speak(link, `AUTH PLAIN ${tok}`, timeoutMs)
       if (!auth.startsWith("235")) throw new Error(auth)

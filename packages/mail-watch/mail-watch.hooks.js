@@ -15,7 +15,7 @@
 // once would read a log that doesn't hold it yet.
 
 import { send } from "./smtp.js"
-import { fill, message } from "./template.js"
+import { fill, message, renderHtml } from "./template.js"
 import { fail, quotaScan, save } from "./watch.js"
 
 // one mail at a time, however many exchanges finish together
@@ -94,7 +94,11 @@ async function mail(o, to, ev) {
   const t = o.template && typeof o.template === "object" ? o.template : {}
   const subject = fill(t.subject ?? "[magpie] {{kind}} · {{provider}}{{window}}", vars)
   const body = fill(t.body ?? "What: {{kind}}\nProvider: {{provider}}{{account}}\n{{modelLine}}{{windowLine}}When: {{time}}\n\n{{detail}}", vars)
-  await send(o.smtp, to, message({ from: o.smtp.from ?? o.smtp.user, to, subject, body }))
+  // the HTML layout: the user's own page when they set one (filled with
+  // the same vars, HTML-escaped variants for the interpolations), the
+  // built-in card otherwise; false opts out of the HTML part entirely
+  const html = t.html === false ? undefined : renderHtml(t.html, vars)
+  await send(o.smtp, to, message({ from: o.smtp.from ?? o.smtp.user, to, subject, body, html }))
 }
 
 // recipients is the option as a list of addresses: a string with commas,
