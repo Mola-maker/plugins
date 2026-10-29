@@ -1,23 +1,7 @@
 // The watch: what mail-watch notices, and what it does about it.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, statSync, openSync, readSync, closeSync } from "node:fs"
-import { join } from "node:path"
-import { homedir } from "node:os"
-
-// paths are where magpie keeps its own files: $MAGPIE_CONFIG_DIR/magpie,
-// else $XDG_CONFIG_HOME/magpie, else ~/.config/magpie — the same rule the
-// app itself follows. MAGPIE_CONFIG_DIR is for tests: the watch must never
-// scan or write the real folder's files from one.
-function paths() {
-  const root = process.env.MAGPIE_CONFIG_DIR || process.env.XDG_CONFIG_HOME
-  const dir = root ? join(root, "magpie") : join(homedir(), ".config", "magpie")
-  return {
-    dir,
-    state: join(dir, "mail-watch-state.json"),
-    usage: join(dir, "usage.jsonl"),
-    quotas: join(dir, "quotas.json"),
-  }
-}
+import { paths } from "./paths.js"
 
 // One watch per host process: st holds the paths, the offset and the
 // sent-times the cooldown reads. init() plants it once.
@@ -36,6 +20,7 @@ export function init() {
       const n = Number(raw.offset)
       if (Number.isFinite(n)) st.offset = n
       if (typeof raw.sent === "object" && raw.sent) st.sent = raw.sent
+      if (Array.isArray(raw.mailed)) st.mailed = raw.mailed.filter((t) => typeof t === "number")
     }
   } catch {}
   if (st.offset < 0) {
@@ -103,6 +88,7 @@ export function fail(opts, now = Date.now()) {
   const o = opts.watch ?? {}
   const cd = opts.cooldown ?? {}
   if (!o.errors) return { events: [], offset: st.offset }
+  pruneSent(cd, now)
   let size = 0
   try {
     size = statSync(st.usage).size
@@ -160,6 +146,7 @@ export function quotaScan(opts, now = Date.now()) {
   const lowAt = Number(o.quotaLowPct)
   const wantLow = o.quotaLow === true && Number.isFinite(lowAt) && lowAt > 0 && lowAt < 100
   if (!wantExhausted && !wantLow) return []
+  pruneSent(cd, now)
   let quotas
   try {
     quotas = JSON.parse(readFileSync(st.quotas, "utf8"))
@@ -169,13 +156,24 @@ export function quotaScan(opts, now = Date.now()) {
   if (!quotas || typeof quotas !== "object") return []
   const out = []
   for (const [key, entry] of Object.entries(quotas)) {
-    const provider = key.split("|")[0]
+    // magpie's own key shape (internal/provider keepLast): provider + "/"
+    // + the account lowercased — "claude/me@example.com". The provider is
+    // everything before the first slash, the account everything after.
+    const slash = key.indexOf("/")
+    const provider = slash < 0 ? key : key.slice(0, slash)
+    const account = slash < 0 ? "" : key.slice(slash + 1)
     if (!listed(o.providers, provider)) continue
     const windows = entry?.quota?.windows
     if (!Array.isArray(windows)) continue
     for (const w of windows) {
       const used = Number(w?.used)
       if (!Number.isFinite(used)) continue
+      // quotas.json holds the last readings, not the live state: a window
+      // whose reset already passed is a stale reading, not a window still
+      // full — skip it, or it re-alerts every cooldown forever. A window
+      // with no parseable reset keeps alerting: its state is unknown,
+      // and silence would hide a real exhaustion.
+      if (expired(w?.resetsAt, now)) continue
       const exhausted = wantExhausted && used >= 100
       const low = wantLow && used >= lowAt && used < 100
       if (!exhausted && !low) continue
@@ -183,10 +181,21 @@ export function quotaScan(opts, now = Date.now()) {
       // the kind is in the key: a "low" mail sent an hour ago must not
       // silence the "exhausted" one when the window reaches 100%
       if (cooled(cd, "quota", ["quota", kind, key, w.name].join("|"), now)) continue
-      out.push({ kind, provider, account: key.split("|")[1] ?? "", window: w.name ?? "", used, resetsAt: w.resetsAt ?? "" })
+      out.push({ kind, provider, account, window: w.name ?? "", used, resetsAt: w.resetsAt ?? "" })
     }
   }
   return out
+}
+
+// expired is whether a window's reset time has already passed: magpie
+// writes resetsAt as an RFC 3339 string (Go's time.Time in JSON), a
+// millisecond number, or a second number — all three parse here.
+function expired(resetsAt, now) {
+  if (resetsAt === undefined || resetsAt === null || resetsAt === "") return false
+  let t
+  if (typeof resetsAt === "number") t = resetsAt > 1e12 ? resetsAt : resetsAt * 1000
+  else t = Date.parse(String(resetsAt))
+  return Number.isFinite(t) && t < now
 }
 
 // the cooldown: a key that sent within its kind's minutes is left out, and
@@ -208,14 +217,57 @@ function listed(list, provider) {
   return list.includes(provider)
 }
 
-// save writes the state file, atomically: the offset and the sent-times.
-// A half-written state must never exist — a restart would resend or forget.
+// pruneSent drops sent-marks older than the longest cooldown still in
+// force, so the map doesn't grow without bound: a mark's only job is to
+// hold its key quiet for its own window, and the longest window (the
+// quota one, 4 hours by default) bounds how long any mark can matter.
+// Suppression itself still reads each kind's own window in cooled().
+function pruneSent(cd, now) {
+  const eff = (kind, def) => {
+    const n = Number(cd?.[kind])
+    return Number.isFinite(n) && n >= 0 ? n : def
+  }
+  const keepAfter = now - Math.max(eff("error", 10), eff("quota", 240)) * 60_000
+  for (const k of Object.keys(st.sent)) {
+    if (typeof st.sent[k] !== "number" || st.sent[k] < keepAfter) delete st.sent[k]
+  }
+}
+
+// takeWithinCap slices events to the mail budget left this hour and
+// records the mails about to be queued, so a bad hour can't send one
+// mail per key without bound: the per-key cooldown caps each key, this
+// caps the hour. cap is maxMailsPerHour; unset or invalid means 20.
+// The count is of mails queued, not delivered — a queued mail that then
+// fails still spent its slot, the way a sent one would.
+export function takeWithinCap(events, cap, now = Date.now()) {
+  init()
+  const limit = Number.isFinite(Number(cap)) && Number(cap) > 0 ? Math.floor(Number(cap)) : 20
+  if (!Array.isArray(st.mailed)) st.mailed = []
+  const hourAgo = now - 3_600_000
+  st.mailed = st.mailed.filter((t) => typeof t === "number" && t > hourAgo)
+  const room = Math.max(0, limit - st.mailed.length)
+  const taken = events.slice(0, room)
+  for (let i = 0; i < taken.length; i++) st.mailed.push(now)
+  return taken
+}
+
+// save writes the state file, atomically — and it merges, never replaces:
+// the file is one object shared with the digest (digest.js keeps its
+// cursor, digestOffset, in it), and a scan that stringified only the
+// watch's own fields used to wipe that cursor on every exchange, so the
+// digest re-read the whole log. Disk fields the watch doesn't own survive;
+// the watch's own fields (offset, sent, mailed) always win.
 export function save() {
   if (!st) return
   try {
     mkdirSync(st.dir, { recursive: true })
+    let disk = {}
+    try {
+      const raw = JSON.parse(readFileSync(st.state, "utf8"))
+      if (raw && typeof raw === "object") disk = raw
+    } catch {}
     const tmp = st.state + ".tmp"
-    writeFileSync(tmp, JSON.stringify(st))
+    writeFileSync(tmp, JSON.stringify({ ...disk, ...st }))
     renameSync(tmp, st.state)
   } catch {}
 }

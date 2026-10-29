@@ -37,9 +37,10 @@ const port = await new Promise((res) => server.listen(0, "127.0.0.1", () => res(
 
 // options as the user might set them, at the SMTP server above. No
 // user/pass: a plain wire with credentials is refused by design, so the
-// relay shape here is the sign-in-free one.
+// relay shape here is the sign-in-free one. secure: false is explicit:
+// the default is TLS, and a plain relay must say so.
 const options = {
-  smtp: { host: "127.0.0.1", port, from: "magpie@example.com" },
+  smtp: { host: "127.0.0.1", port, secure: false, from: "magpie@example.com" },
   to: ["me@example.com"],
   watch: { errors: true, quotaExhausted: true, quotaLow: true, quotaLowPct: 90 },
   cooldownMinutes: { error: 0, quota: 0 },

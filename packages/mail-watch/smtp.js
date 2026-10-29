@@ -40,11 +40,14 @@ export const PRESETS = {
 
 // resolveSmtp applies a preset under the explicit options: a host given by
 // hand wins, an unset secure/port takes the preset's, an unknown preset is
-// ignored (and a missing host then fails as before).
+// ignored (and a missing host then fails as before). secure defaults to
+// TLS: a mailhost that wants no TLS must say so explicitly
+// ("secure": false) — the safe direction for credentials, and the port
+// follows (465 with TLS, 587 without).
 export function resolveSmtp(cfg) {
   const preset = PRESETS[String(cfg.preset ?? "").toLowerCase()]
   const host = cfg.host ?? preset?.host
-  const secure = cfg.secure ?? preset?.secure ?? false
+  const secure = cfg.secure ?? preset?.secure ?? true
   const port = Number(cfg.port) || preset?.port || (secure ? 465 : 587)
   return { host: host === undefined ? undefined : String(host), port, secure }
 }
@@ -128,7 +131,11 @@ export async function send(cfg, to, body, { timeoutMs = 30000 } = {}) {
     link.sock = await Bun.connect({
       hostname: host,
       port,
-      tls: cfg.secure ? { rejectUnauthorized: verify, serverName: name } : undefined,
+      // the RESOLVED secure: send used to read cfg.secure here, so a
+      // preset-only config (secure true from the preset, unset in cfg)
+      // connected in plain text to a TLS port and timed out — the
+      // preset never worked, though resolving it did.
+      tls: secure ? { rejectUnauthorized: verify, serverName: name } : undefined,
       socket: handlers,
     })
     await withTimeout(opened, timeoutMs, "connect")
@@ -136,9 +143,10 @@ export async function send(cfg, to, body, { timeoutMs = 30000 } = {}) {
     if (!greet.startsWith("220")) throw new Error(greet)
     const ehlo = await speak(link, "EHLO magpie", timeoutMs)
     if (!ehlo.startsWith("250")) throw new Error(ehlo)
-    if (!cfg.secure && cfg.user) {
+    if (!secure && cfg.user) {
       throw new Error("a plain connection sends the password in cleartext; set \"secure\": true (TLS, port 465) or drop the user to use an open relay")
-    }    if (cfg.user) {
+    }
+    if (cfg.user) {
       const tok = Buffer.from(`\0${cfg.user}\0${cfg.pass ?? ""}`, "utf8").toString("base64")
       const auth = await speak(link, `AUTH PLAIN ${tok}`, timeoutMs)
       if (!auth.startsWith("235")) throw new Error(auth)

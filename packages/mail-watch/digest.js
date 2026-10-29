@@ -8,21 +8,13 @@
 // saves the cursor, so the next digest covers only what came after — the
 // same byte-offset walk the alerts use, one cursor for both.
 
-import { readFileSync, existsSync, renameSync, writeFileSync, mkdirSync, openSync, readSync, closeSync, statSync } from "node:fs"
-import { join } from "node:path"
-import { homedir } from "node:os"
+import { readFileSync, renameSync, writeFileSync, mkdirSync, openSync, readSync, closeSync, statSync } from "node:fs"
+import { paths } from "./paths.js"
 
-// paths mirror watch.js's rule: $MAGPIE_CONFIG_DIR/magpie, else
-// $XDG_CONFIG_HOME/magpie, else ~/.config/magpie
-function paths() {
-  const root = process.env.MAGPIE_CONFIG_DIR || process.env.XDG_CONFIG_DIR || process.env.XDG_CONFIG_HOME
-  const dir = root ? join(root, "magpie") : join(homedir(), ".config", "magpie")
-  return {
-    dir,
-    state: join(dir, "mail-watch-state.json"),
-    usage: join(dir, "usage.jsonl"),
-  }
-}
+// paths is the one shared rule (see paths.js): the digest used to keep
+// its own copy, which read XDG_CONFIG_DIR — a variable magpie never
+// reads — and honoured no portable install, so on those machines the
+// digest and the alerts read different folders' logs.
 
 // init loads or plants the shared state file. The digest keeps its own
 // cursor (digestOffset) in the same file the alerts use — two walkers, one
@@ -57,6 +49,14 @@ export function baselineDigest() {
   } catch {}
   state.digestOffset = size
   saveState(p, state)
+}
+
+// listed is whether provider is one the user asked for: an empty list is
+// every provider, a non-empty one only those on it (the same rule the
+// alerts use in watch.js).
+function listed(list, provider) {
+  if (!Array.isArray(list) || !list.length) return true
+  return list.includes(provider)
 }
 
 // short is a session id as the mail shows it: first 8 chars — enough to
@@ -105,6 +105,12 @@ export function readDigest(opts, now = Date.now()) {
     } catch {
       continue
     }
+    // the digest honours the same provider list the alerts do: a user
+    // who allow-listed providers mails only those providers' usage, not
+    // the whole gateway's. An empty list is every provider. Filtered-out
+    // rows are still consumed — the window covers a span of time, and a
+    // row left for a later digest would double-count.
+    if (!listed(opts?.providers, r.provider)) continue
     rows.push(r)
   }
   const d = emptyDigest()

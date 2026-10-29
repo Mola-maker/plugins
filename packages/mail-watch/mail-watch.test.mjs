@@ -24,6 +24,7 @@ const watch = await import("./watch.js")
 const { fill, message, renderHtml, DEFAULT_HTML } = await import("./template.js")
 const { send, resolveSmtp, PRESETS } = await import("./smtp.js")
 const { readDigest, baselineDigest } = await import("./digest.js")
+const { onResponse, digestScheduleForTests, resetDigestScheduleForTests } = await import("./mail-watch.hooks.js")
 
 // ---- the fake SMTP servers ---------------------------------------------
 // Two shapes, matching what the client speaks:
@@ -201,9 +202,11 @@ describe("template", () => {
   test("resolveSmtp applies a preset under explicit options", () => {
     expect(resolveSmtp({ preset: "qq", user: "u" })).toEqual({ host: "smtp.qq.com", port: 465, secure: true })
     expect(resolveSmtp({ preset: "GMAIL" })).toEqual({ host: "smtp.gmail.com", port: 465, secure: true })
-    // a hand-set host and port win; an unknown preset is ignored
+    // a hand-set host and port win; an unknown preset is ignored — and
+    // secure defaults to TLS, so the port follows (465, not 587)
     expect(resolveSmtp({ preset: "qq", host: "relay.lan", port: 2525 })).toEqual({ host: "relay.lan", port: 2525, secure: true })
-    expect(resolveSmtp({ preset: "nope", host: "relay.lan" })).toEqual({ host: "relay.lan", port: 587, secure: false })
+    expect(resolveSmtp({ preset: "nope", host: "relay.lan" })).toEqual({ host: "relay.lan", port: 465, secure: true })
+    expect(resolveSmtp({ host: "relay.lan", secure: false })).toEqual({ host: "relay.lan", port: 587, secure: false })
     expect(Object.keys(PRESETS)).toContain("163")
   })
 })
@@ -227,15 +230,34 @@ describe("smtp", () => {
   test("a plain port with a user refuses to send the password", async () => {
     const port = await startPlain()
     const body = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "x" })
-    expect(send({ host: "127.0.0.1", port, user: "u", pass: "p" }, ["t@x.y"], body)).rejects.toThrow(/cleartext/)
+    expect(send({ host: "127.0.0.1", port, secure: false, user: "u", pass: "p" }, ["t@x.y"], body)).rejects.toThrow(/cleartext/)
   })
 
   test("a plain relay with no user sends fine", async () => {
     const port = await startPlain()
     const body = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "x" })
-    const r = await send({ host: "127.0.0.1", port, from: "f@x.y" }, ["t@x.y"], body)
+    const r = await send({ host: "127.0.0.1", port, secure: false, from: "f@x.y" }, ["t@x.y"], body)
     expect(r.startsWith("250")).toBe(true)
     expect(got.commands).toContain("MAIL FROM:<f@x.y>")
+  })
+
+  test("an unset secure means TLS: a TLS server answers, a plain one is never tried", async () => {
+    const port = await startSecure()
+    if (!port) return // no openssl on this machine
+    const body = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "x" })
+    const r = await send({ host: "127.0.0.1", port, user: "u", pass: "p", from: "f@x.y", insecure: true }, ["t@x.y"], body)
+    expect(r.startsWith("250")).toBe(true)
+  })
+
+  test("a preset's secure is used by send, not just by resolveSmtp", async () => {
+    // the preset-only failure: resolving gave TLS on 465, but send read
+    // cfg.secure (unset) and connected in plain text. Host overridden
+    // here to the fake server; secure still comes from the preset.
+    const port = await startSecure()
+    if (!port) return // no openssl on this machine
+    const body = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "x" })
+    const r = await send({ preset: "qq", host: "127.0.0.1", port, user: "u", pass: "p", from: "f@x.y", insecure: true }, ["t@x.y"], body)
+    expect(r.startsWith("250")).toBe(true)
   })
 
   test("a refused AUTH (535) fails the send", async () => {
@@ -248,18 +270,18 @@ describe("smtp", () => {
   test("a refused MAIL FROM (503) fails the send", async () => {
     const port = await startPlain({ failMailFrom: true })
     const body = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "x" })
-    expect(send({ host: "127.0.0.1", port, from: "f@x.y" }, ["t@x.y"], body)).rejects.toThrow("503")
+    expect(send({ host: "127.0.0.1", port, secure: false, from: "f@x.y" }, ["t@x.y"], body)).rejects.toThrow("503")
   })
 
   test("send rejects on a refused recipient", async () => {
     const port = await startPlain({ failRcpt: true })
     const body = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "x" })
-    expect(send({ host: "127.0.0.1", port, from: "f@x.y" }, ["t@x.y"], body)).rejects.toThrow("550")
+    expect(send({ host: "127.0.0.1", port, secure: false, from: "f@x.y" }, ["t@x.y"], body)).rejects.toThrow("550")
   })
 
   test("send refuses a host that never answers", async () => {
     const body = message({ from: "f@x.y", to: ["t@x.y"], subject: "s", body: "x" })
-    expect(send({ host: "127.0.0.1", port: 1, from: "f@x.y" }, ["t@x.y"], body, { timeoutMs: 800 })).rejects.toThrow()
+    expect(send({ host: "127.0.0.1", port: 1, secure: false, from: "f@x.y" }, ["t@x.y"], body, { timeoutMs: 800 })).rejects.toThrow()
   })
 })
 
@@ -378,13 +400,16 @@ describe("watch", () => {
     writeFileSync(
       join(dir, "magpie", "quotas.json"),
       JSON.stringify({
-        "prov|me@example.com": { at: "t", quota: { windows: [{ name: "5 hours", used: 100 }, { name: "7 days", used: 92 }] } },
-        "other|u": { quota: { windows: [{ name: "w", used: 55 }] } },
+        // magpie's real key shape: provider/account, account lowercased
+        "prov/me@example.com": { at: "t", quota: { windows: [{ name: "5 hours", used: 100 }, { name: "7 days", used: 92 }] } },
+        "other/u": { quota: { windows: [{ name: "w", used: 55 }] } },
       }),
     )
     const o = { watch: { quotaExhausted: true, quotaLow: true, quotaLowPct: 90 }, cooldown: { quota: 0 } }
     const ev = watch.quotaScan(o, 7000)
     expect(ev.map((e) => e.kind + ":" + e.window)).toEqual(["quotaExhausted:5 hours", "quotaLow:7 days"])
+    expect(ev[0].account).toBe("me@example.com")
+    expect(ev[0].provider).toBe("prov")
     // same again with a long cooldown: nothing — but the low and exhausted
     // keys are apart, so a window that goes 92→100 still alerts. The sent
     // map starts clean here: the scan above (cooldown 0) marked it already.
@@ -398,7 +423,85 @@ describe("watch", () => {
   test("quotaScan skips unlisted providers and unconfigured kinds", () => {
     const o = { watch: { quotaExhausted: true, providers: ["other"] }, cooldown: { quota: 0 } }
     const ev = watch.quotaScan(o, 8000)
-    expect(ev).toEqual([]) // prov|me is not listed
+    expect(ev).toEqual([]) // prov/me is not listed
+  })
+
+  test("quotaScan matches the real key shape and skips windows whose reset passed", () => {
+    // quotas.json holds last readings, not live state: a window whose
+    // reset already passed is stale, not still full. A window with no
+    // parseable reset keeps alerting — its state is unknown.
+    const now = Date.parse("2026-10-28T12:00:00Z")
+    writeFileSync(
+      join(dir, "magpie", "quotas.json"),
+      JSON.stringify({
+        "claude/me@example.com": {
+          quota: {
+            windows: [
+              { name: "stale", used: 100, resetsAt: "2026-10-28T11:00:00Z" },
+              { name: "live", used: 100, resetsAt: "2026-10-28T13:00:00Z" },
+              { name: "unknown", used: 100 },
+            ],
+          },
+        },
+      }),
+    )
+    watch.forTests({ sent: {} })
+    const o = { watch: { quotaExhausted: true, providers: ["claude"] }, cooldown: { quota: 0 } }
+    const ev = watch.quotaScan(o, now)
+    expect(ev.map((e) => e.window)).toEqual(["live", "unknown"])
+    expect(ev.every((e) => e.provider === "claude" && e.account === "me@example.com")).toBe(true)
+  })
+
+  test("an alert scan's save keeps the digest cursor (one state, one writer)", () => {
+    // the reported failure: 1000 rows, digest baseline, one new failing
+    // row, an alert scan, a save — then the digest must see exactly the
+    // one new row, not the whole log again.
+    const rows = Array.from({ length: 1000 }, (_, i) => JSON.stringify({ session: `s${i}`, agent: "a", provider: "p", model: "m", status: 200 }) + "\n").join("")
+    writeFileSync(usage, rows)
+    writeFileSync(state, JSON.stringify({}))
+    baselineDigest()
+    const planted = JSON.parse(readFileSync(state, "utf8")).digestOffset
+    expect(planted).toBe(Buffer.byteLength(rows))
+    const failRow = JSON.stringify({ provider: "p9", status: 500, err: "boom" }) + "\n"
+    writeFileSync(usage, rows + failRow)
+    watch.forTests({ offset: Buffer.byteLength(rows), sent: {} })
+    const r = watch.fail({ watch: { errors: true }, cooldown: { error: 0 } }, 9000)
+    expect(r.events).toHaveLength(1)
+    expect(r.events[0].provider).toBe("p9")
+    watch.save()
+    const after = JSON.parse(readFileSync(state, "utf8"))
+    expect(after.digestOffset).toBe(planted) // the scan did not wipe it
+    const { digest } = readDigest({})
+    expect(digest.rows).toBe(1)
+    // clean up: later tests plant their own digest cursor
+    const cleaned = JSON.parse(readFileSync(state, "utf8"))
+    delete cleaned.digestOffset
+    writeFileSync(state, JSON.stringify(cleaned))
+    writeFileSync(usage, "")
+    watch.forTests({ offset: 0 })
+  })
+
+  test("the hourly cap bounds a bad hour (default 20)", () => {
+    const evs = [{ kind: "error" }, { kind: "error" }, { kind: "error" }]
+    watch.forTests({ sent: {}, mailed: [] })
+    expect(watch.takeWithinCap(evs, 2, 1000)).toHaveLength(2)
+    expect(watch.takeWithinCap(evs, 2, 2000)).toHaveLength(0)
+    expect(watch.takeWithinCap(evs, 2, 1000 + 3_600_000 + 1)).toHaveLength(2)
+    watch.forTests({ mailed: [] })
+    expect(watch.takeWithinCap(Array.from({ length: 25 }, () => ({})), undefined, 5000)).toHaveLength(20)
+  })
+
+  test("sent-marks older than the longest cooldown are pruned", () => {
+    writeFileSync(
+      join(dir, "magpie", "quotas.json"),
+      JSON.stringify({ "claude/me@example.com": { quota: { windows: [{ name: "5h", used: 100 }] } } }),
+    )
+    watch.forTests({ sent: { "quota|quotaExhausted|claude/me@example.com|5h": 1000 } })
+    const o = { watch: { quotaExhausted: true }, cooldown: { quota: 240 } }
+    expect(watch.quotaScan(o, 1000 + 60_000)).toEqual([]) // still held
+    const ev = watch.quotaScan(o, 1000 + 241 * 60_000) // past the window: pruned, alerts again
+    expect(ev).toHaveLength(1)
+    expect(ev[0].provider).toBe("claude")
   })
 
   test("save writes atomically and leaves no temp file", () => {
@@ -465,5 +568,81 @@ describe("digest", () => {
     const { digest } = readDigest({})
     expect(digest.rows).toBe(0)
     writeFileSync(usage, "")
+  })
+
+  test("readDigest honours the provider list, the way the alerts do", () => {
+    writeFileSync(usage, "")
+    const raw = JSON.parse(readFileSync(state, "utf8"))
+    delete raw.digestOffset
+    writeFileSync(state, JSON.stringify(raw))
+    baselineDigest()
+    const rows = [
+      { session: "ffffffff-6666", agent: "claude", provider: "p1", model: "m", status: 200 },
+      { session: "ffffffff-6666", agent: "claude", provider: "p1", model: "m", status: 200 },
+      { session: "gggggggg-7777", agent: "node", provider: "p2", model: "m", status: 200 },
+    ]
+    writeFileSync(usage, rows.map((r) => JSON.stringify(r)).join("\n") + "\n")
+    const { digest } = readDigest({ providers: ["p1"] })
+    expect(digest.rows).toBe(2)
+    expect(digest.providers).toEqual({ p1: 2 })
+    writeFileSync(usage, "")
+  })
+})
+
+// ---- hooks -------------------------------------------------------------------
+describe("hooks", () => {
+  const usage = join(dir, "magpie", "usage.jsonl")
+  const state = join(dir, "magpie", "mail-watch-state.json")
+  // the watch is off in these tests: the alert scan they schedule is a
+  // no-op (save only), so no stray scan disturbs another test's rows.
+  const quiet = (over = {}) => ({
+    smtp: { host: "127.0.0.1", port: 1, secure: false },
+    to: ["t@x.y"],
+    watch: { errors: false, quotaExhausted: false, quotaLow: false },
+    ...over,
+  })
+
+  test("the digest timer is armed once: later exchanges don't move its due time", async () => {
+    const o = quiet({ report: { hours: 6 } })
+    await onResponse(null, { options: o, success: true })
+    const s1 = digestScheduleForTests()
+    expect(s1.armed).toBe(true)
+    await Bun.sleep(20)
+    await onResponse(null, { options: o, success: true })
+    expect(digestScheduleForTests().at).toBe(s1.at)
+    // a changed schedule re-arms; turning the report off cancels
+    await onResponse(null, { options: quiet({ report: { hours: 12 } }), success: true })
+    const s3 = digestScheduleForTests()
+    expect(s3.armed).toBe(true)
+    expect(s3.at).not.toBe(s1.at)
+    await onResponse(null, { options: quiet(), success: true })
+    expect(digestScheduleForTests()).toEqual({ at: 0, armed: false })
+    resetDigestScheduleForTests()
+  })
+
+  test("the digest fires on its original schedule under continuous traffic", async () => {
+    const port = await startSecure()
+    if (!port) return // no openssl on this machine
+    writeFileSync(usage, "")
+    const raw = JSON.parse(readFileSync(state, "utf8"))
+    delete raw.digestOffset
+    writeFileSync(state, JSON.stringify(raw))
+    const o = {
+      smtp: { host: "127.0.0.1", port, secure: true, insecure: true, from: "f@x.y" },
+      to: ["t@x.y"],
+      report: { hours: 300 / 3_600_000 }, // due 300 ms after the first exchange
+      watch: { errors: false, quotaExhausted: false, quotaLow: false },
+    }
+    await onResponse(null, { options: o, success: true }) // baseline + arm
+    writeFileSync(usage, JSON.stringify({ session: "eeeeeeee-5555", agent: "claude", provider: "p", model: "m", status: 200 }) + "\n")
+    // an exchange every 10 ms for ~500 ms: the old code re-armed on each
+    // and would not fire until ~800 ms; the fixed one fires at ~300 ms.
+    for (let i = 0; i < 50; i++) {
+      await onResponse(null, { options: o, success: true })
+      await Bun.sleep(10)
+    }
+    expect(got.commands).toContain("DATA")
+    expect(got.body.length).toBeGreaterThan(0)
+    resetDigestScheduleForTests()
   })
 })

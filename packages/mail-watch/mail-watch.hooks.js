@@ -14,9 +14,9 @@
 // the call's row as (or after) the reply goes out, and a scan that ran at
 // once would read a log that doesn't hold it yet.
 
-import { send } from "./smtp.js"
+import { send, resolveSmtp } from "./smtp.js"
 import { fill, message, renderHtml } from "./template.js"
-import { fail, quotaScan, save } from "./watch.js"
+import { fail, quotaScan, save, takeWithinCap } from "./watch.js"
 import { readDigest, baselineDigest } from "./digest.js"
 
 // one mail at a time, however many exchanges finish together
@@ -26,6 +26,10 @@ let timer = null
 // the digest's due time: the next moment the window closes; 0 = unscheduled
 let digestAt = 0
 let digestTimer = null
+// the hours the armed timer was set for, and the latest options seen:
+// the fired digest mails with the newest options, not the arming one's
+let digestHours = 0
+let latestDigest = null
 
 // PAUSE is how long the scan waits after an exchange ends, for the usage
 // row to be written: short enough to stay behind the next exchange's own
@@ -42,7 +46,10 @@ export async function onResponse(_reply, ctx) {
     const o = ctx?.options
     if (!o || typeof o !== "object") return
     const to = recipients(o.to)
-    if (!to.length || !o.smtp?.host) return
+    // the RESOLVED host: a preset-only config has no smtp.host of its
+    // own, and the old guard turned every such exchange away before the
+    // scan ever ran — presets could resolve but never send.
+    if (!to.length || !resolveSmtp(o.smtp ?? {}).host) return
     schedule(o, to)
     scheduleDigest(o, to)
   } catch {}
@@ -59,35 +66,63 @@ function schedule(o, to) {
   }, PAUSE)
 }
 
-// scheduleDigest arms the periodic usage report: report.hours after the
-// last arm (default 6), first due run reads everything since the last
-// digest — or, on a fresh install, since now, so the first mail is the
-// shape of what happened, not a replay of the whole log. Rearming keeps
-// one timer; the window slides rather than stacks.
+// scheduleDigest arms the periodic usage report — opt-in only: no
+// report.hours, no digest, ever (the old package default mailed one every
+// 6 hours to anyone who had only filled in SMTP).
+//
+// The timer arms ONCE and is not moved by later exchanges: the old code
+// re-armed on every onResponse, so under continuous traffic the due time
+// slid forward forever and the digest never fired. Only two things move
+// it: the schedule itself changing (hours edited — re-arm with the new
+// wait), or the report being turned off (cancel). The fired digest mails
+// with the latest options seen, then arms the next window.
 function scheduleDigest(o, to) {
   const hours = Number(o.report?.hours)
-  if (!Number.isFinite(hours) || hours <= 0) return
-  const wait = hours * 3_600_000
-  const now = Date.now()
+  if (!Number.isFinite(hours) || hours <= 0) {
+    if (digestTimer) clearTimeout(digestTimer)
+    digestTimer = null
+    digestAt = 0
+    digestHours = 0
+    return
+  }
   if (!digestAt) baselineDigest() // first sight: report from here on
-  digestAt = now + wait
+  latestDigest = { o, to }
+  if (digestTimer && hours === digestHours) return // already armed: leave the due time alone
   if (digestTimer) clearTimeout(digestTimer)
+  digestHours = hours
+  const wait = hours * 3_600_000
+  digestAt = Date.now() + wait
   digestTimer = setTimeout(() => {
     digestTimer = null
     digestAt = 0
-    sendDigest(o, to).catch(() => {})
-    scheduleDigest(o, to) // arm the next window
+    const cur = latestDigest ?? { o, to }
+    sendDigest(cur.o, cur.to).catch(() => {})
+    scheduleDigest(cur.o, cur.to) // arm the next window
   }, wait)
 }
 
+// digestScheduleForTests exposes the digest timer's state, and
+// resetDigestScheduleForTests clears it: production never calls either.
+export function digestScheduleForTests() {
+  return { at: digestAt, armed: digestTimer !== null }
+}
+export function resetDigestScheduleForTests() {
+  if (digestTimer) clearTimeout(digestTimer)
+  digestTimer = null
+  digestAt = 0
+  digestHours = 0
+  latestDigest = null
+}
+
 // sendDigest reads the window's rows and mails the summary through the
-// same queue the alerts use.
+// same queue the alerts use. The window honours the provider list, the
+// way the alerts do.
 async function sendDigest(o, to) {
-  const { digest } = readDigest({})
+  const { digest } = readDigest({ providers: o.watch?.providers })
   if (!digest.rows) return // an empty window sends nothing
   const t = o.template && typeof o.template === "object" ? o.template : {}
   const vars = digestVars(digest)
-  const subject = fill(t.reportSubject ?? "[magpie] 使用摘要 · {{rows}} 次调用 · {{credits}} credits", vars)
+  const subject = fill(t.reportSubject ?? "[magpie] usage digest · {{rows}} calls · {{credits}} credits", vars)
   const body = fill(t.reportBody ?? DEFAULT_REPORT_BODY, vars)
   const html = t.html === false ? undefined : renderHtml(t.reportHtml, vars)
   await send(o.smtp, to, message({ from: o.smtp.from ?? o.smtp.user, to, subject, body, html }))
@@ -109,9 +144,9 @@ function digestVars(d) {
   const providers = table(d.providers)
   const models = table(d.models)
   const sessions = Object.entries(d.sessions)
-  const line = ([k, n]) => `${k} — ${n} 次 (${Math.round((n / rows) * 100)}%)`
+  const line = ([k, n]) => `${k} — ${n} calls (${Math.round((n / rows) * 100)}%)`
   const modelLine = (kv) =>
-    kv.map(([k, n]) => `<tr><td style="padding:4px 0;color:#6b7280;">${k}</td><td style="padding:4px 0;">${n} 次 ${bar((n / rows) * 100)} <span style="color:#9ca3af;font-size:12px;">${Math.round((n / rows) * 100)}%</span></td></tr>`).join("")
+    kv.map(([k, n]) => `<tr><td style="padding:4px 0;color:#6b7280;">${k}</td><td style="padding:4px 0;">${n} calls ${bar((n / rows) * 100)} <span style="color:#9ca3af;font-size:12px;">${Math.round((n / rows) * 100)}%</span></td></tr>`).join("")
   return {
     rows: d.rows,
     ok: d.ok,
@@ -123,7 +158,7 @@ function digestVars(d) {
     agentList: agents.map(line).join("\n"),
     providerList: providers.map(line).join("\n"),
     modelList: models.map(line).join("\n"),
-    sessionList: sessions.slice(0, 20).map(([sid, s]) => `${sid}… (${s.rows} 次调用 · ${Object.keys(s.agents).length} 个 agent)`).join("\n"),
+    sessionList: sessions.slice(0, 20).map(([sid, s]) => `${sid}… (${s.rows} calls · ${Object.keys(s.agents).length} agents)`).join("\n"),
     agentRows: modelLine(agents),
     providerRows: modelLine(providers),
     modelRows: modelLine(models),
@@ -131,9 +166,9 @@ function digestVars(d) {
   }
 }
 
-const DEFAULT_REPORT_BODY = `magpie 使用摘要
+const DEFAULT_REPORT_BODY = `magpie usage digest
 
-Calls: {{rows}} (成功 {{ok}} / 失败 {{failed}})
+Calls: {{rows}} (ok {{ok}} / failed {{failed}})
 Credits: {{credits}}
 Tokens: {{tokensIn}} in / {{tokensOut}} out
 Sessions: {{sessionCount}}
@@ -175,7 +210,7 @@ const DEFAULT_REPORT_HTML = `<!DOCTYPE html>
 
 async function scan(o, to) {
   const opts = { watch: o.watch ?? {}, cooldown: o.cooldownMinutes ?? {} }
-  const events = [...fail(opts).events, ...quotaScan(opts)]
+  const events = takeWithinCap([...fail(opts).events, ...quotaScan(opts)], o.maxMailsPerHour)
   if (!events.length) {
     save()
     return
