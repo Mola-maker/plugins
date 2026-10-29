@@ -104,7 +104,56 @@
     if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
     if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
     if (n >= 1e3) return (n / 1e3).toFixed(1) + " KB";
-    return n + " B";
+    // byte counts are whole: the counters interpolate mid-replay, and
+    // an unrounded fraction here used to show as 3.164870684975676 B
+    return Math.round(n) + " B";
+  }
+
+  // The view state a reload carries in location.hash: the project, the
+  // vertical scroll, and the replay playhead. The hash survives
+  // location.reload() in a sandboxed frame and needs no storage, which
+  // is what makes it usable here: the page cannot fetch, and the
+  // service must not answer cross-origin reads, so the fresh document
+  // cannot ask what changed — it can only read what the old document
+  // left in the hash. Pure, so a test can check the round-trip and
+  // the restore decision without a DOM.
+  function formatViewHash(state) {
+    const p = encodeURIComponent(String(state.project || ""));
+    const y = Math.max(0, Math.round(Number(state.scrollY) || 0));
+    const t = Math.max(0, Math.round((Number(state.playhead) || 0) * 1000) / 1000);
+    return `#p=${p}&y=${y}&t=${t}`;
+  }
+  function parseViewHash(hash) {
+    const h = String(hash || "").replace(/^#/, "");
+    if (!h) return null;
+    let params;
+    try { params = new URLSearchParams(h); } catch { return null; }
+    const project = params.get("p");
+    if (!project) return null;
+    const y = Number(params.get("y"));
+    const t = Number(params.get("t"));
+    return {
+      project,
+      scrollY: Number.isFinite(y) && y > 0 ? Math.round(y) : 0,
+      playhead: Number.isFinite(t) && t > 0 ? t : 0,
+    };
+  }
+  // Which view a fresh document restores from the hash, or null for a
+  // plain first look (no hash, or a hash naming a project that is no
+  // longer there — a renamed project must not pin the page to a
+  // ghost). The playhead clamps to the project's steps: the data may
+  // have grown or shrunk since the hash was written. Under reduced
+  // motion the page settles on the final state whatever the hash says.
+  function resolveRestoredView(projects, hash, reducedMotion) {
+    const parsed = parseViewHash(hash);
+    if (!parsed) return null;
+    const project = (projects || []).find((p) => p.name === parsed.project);
+    if (!project) return null;
+    const n = steps(project).length;
+    if (reducedMotion || parsed.playhead >= n) {
+      return { project: parsed.project, scrollY: parsed.scrollY, playhead: n, settled: true };
+    }
+    return { project: parsed.project, scrollY: parsed.scrollY, playhead: Math.min(parsed.playhead, n), settled: false };
   }
 
   // Lane 0 is main, the middle bough; other branches follow in the order
@@ -400,5 +449,6 @@
     TEXT, text, bytes, lanes, steps, publishes, layout, detail, AGENTS, agentOf,
     ICONS, LEAF_GLYPH, glyphFor, iconDraw,
     cubicBezier, magpieEase, easeOutCubic, easeOutBack, clamp01, frame, pulse, markInk,
+    formatViewHash, parseViewHash, resolveRestoredView,
   };
 })();

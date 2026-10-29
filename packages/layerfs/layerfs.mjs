@@ -224,7 +224,11 @@ function walkSourceFiles(dir) {
     }
   }
   walk(dir, "")
-  return { files, skipped }
+  // Sorted, not readdir order: readdirSync returns the file system's
+  // own order (ext4's hash order on Linux, sorted on APFS), and the
+  // caller reports this list — an unsorted one made the report differ
+  // by OS, dropping a different name on each (#477).
+  return { files, skipped: skipped.sort() }
 }
 
 // The sim backend's import scan: a manifest { rel: { sha, size, mode } }
@@ -587,7 +591,9 @@ export class SimBackend {
       ...(created.created ? { projectCreated: true } : {}),
       ...(created.skipped?.length ? {
         importSkipped: created.skipped.length,
-        skippedSecrets: created.skipped.slice(0, 5),
+        // every skipped name, sorted (see walkSourceFiles): the old
+        // slice(0, 5) dropped a different sixth name on each OS.
+        skippedSecrets: created.skipped,
       } : {}),
     }
   }

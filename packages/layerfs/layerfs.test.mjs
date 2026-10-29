@@ -385,7 +385,10 @@ test("item 3: an import skips secret-shaped files and reports them", async () =>
   const ws = await call("provision", { project: "website" })
   expect(ws.files).toBe(4) // only the fixture's real files
   expect(ws.importSkipped).toBe(6) // .env, docs/.env.local, .git, id_rsa, cert.pem, sub/.ssh
-  expect(ws.skippedSecrets).toContain(".env")
+  // the full sorted list, not a containment check: the old slice(0, 5)
+  // dropped whichever name readdir order put sixth, so this passed on
+  // APFS and failed on ext4 (#477)
+  expect(ws.skippedSecrets).toEqual([".env", ".git", "cert.pem", "docs/.env.local", "id_rsa", "sub/.ssh"])
   expect(existsSync(join(ws.path, ".env"))).toBe(false)
   expect(existsSync(join(ws.path, "id_rsa"))).toBe(false)
   expect(existsSync(join(ws.path, ".git"))).toBe(false)

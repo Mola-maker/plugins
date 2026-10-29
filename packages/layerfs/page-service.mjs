@@ -89,8 +89,11 @@ function compose(pageDir, data, lang) {
     .replace("<!-- layerfs:scripts -->",
       `<script>globalThis.LayerfsTheme = ${theme};</script>` +
       `<script type="application/json" id="data">${json}</script>` +
-      `<script>${view}</script><script>${app}</script>` +
-      `<script>setTimeout(() => location.reload(), 5000);</script>`)
+      `<script>${view}</script><script>${app}</script>`)
+  // No reload script here: the page owns its own liveness tick (see
+  // app.js) — it must write the view into location.hash and skip the
+  // reload while the replay runs or the menu stands open, and a blind
+  // timer appended here would reset the view every 5 s regardless.
 }
 
 // Start the service. backend answers trajectory(); port is the

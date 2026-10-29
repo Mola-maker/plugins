@@ -185,9 +185,13 @@ serves its chat page:
   route, GET /, as HTML: the trajectory UI with the recording
   embedded as `<script type="application/json" id="data">`, which
   the page reads from the DOM — never by fetch. The page reloads
-  itself every few seconds, and every reload is a fresh navigation,
-  so the picture stays live. An empty store answers an empty
-  trajectory, and the page shows its honest empty state.
+  itself every few seconds, keeping its view across each reload (the
+  project, the scroll, and the replay position ride in
+  `location.hash`), so the picture stays live. With no store there
+  is no service at all, so the frame shows the browser's
+  refused-to-connect page until the first project is provisioned;
+  a store with no recorded checkpoints yet shows the page's honest
+  empty state.
 - **The service is closed to other sites.** It emits no CORS
   headers and refuses any request carrying an Origin (a sandboxed
   iframe's fetch sends `Origin: null`); it serves no `.js` data

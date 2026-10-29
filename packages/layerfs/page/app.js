@@ -502,5 +502,37 @@
   $("statsLine").textContent =
     `${t.stats} · ${t.dedupe} ${totals.dedupRatio ?? "–"}× · ${t.stored} ${V.bytes(totals.storedBytes)} / ${V.bytes(totals.logicalBytes)}`;
 
-  show(projects[0].name);
+  // A reload restores the view the old document left in location.hash
+  // (see view.js): the project, the scroll, and the replay position —
+  // paused, not replayed. Without a hash this is a plain first look
+  // and the replay runs.
+  const restored = V.resolveRestoredView(projects, location.hash, RM);
+  show(restored ? restored.project : projects[0].name, !!restored);
+  if (restored) {
+    playhead = (restored.settled || RM) ? view.stepsList.length : restored.playhead;
+    render();
+    if (restored.scrollY) window.scrollTo(0, restored.scrollY);
+  }
+
+  // Liveness: the page reloads itself every few seconds so the picture
+  // stays current — but never in the middle of a look. While the
+  // replay runs or the project menu stands open the tick waits and
+  // tries again; otherwise it writes the view into the hash first, so
+  // the fresh document restores exactly this look instead of starting
+  // over at the first project, the top, and the replay's beginning.
+  // A reload-only-when-changed tick is not possible in the frame: the
+  // sandbox allows no fetch, so the page cannot learn whether the
+  // trajectory moved without reloading — and the service must not
+  // answer cross-origin reads. The hash is the whole channel.
+  function armReload() { setTimeout(reloadTick, 5000); }
+  function reloadTick() {
+    if (playing || !projList.hidden) { armReload(); return; }
+    location.hash = V.formatViewHash({
+      project: currentProject,
+      scrollY: Math.round(window.scrollY || 0),
+      playhead,
+    });
+    location.reload();
+  }
+  armReload();
 })();
