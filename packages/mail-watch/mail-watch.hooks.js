@@ -26,6 +26,10 @@ let timer = null
 // the digest's due time: the next moment the window closes; 0 = unscheduled
 let digestAt = 0
 let digestTimer = null
+// the delay the armed timer was actually started with: setTimeout clamps
+// anything above 2^31-1 ms to 1 ms, so a long window is armed in capped
+// steps, never in one clamped delay (see armDigest).
+let digestStep = 0
 // the hours the armed timer was set for, and the latest options seen:
 // the fired digest mails with the newest options, not the arming one's
 let digestHours = 0
@@ -94,7 +98,12 @@ function scheduleDigest(o, to) {
     digestTimer = null
     digestAt = 0
     digestHours = 0
-    setDigestDue(0, 0) // a disabled report leaves no due time behind
+    digestStep = 0
+    // a disabled report leaves no due time behind — but only write when
+    // one is actually due: with the report off (the default) this runs on
+    // every exchange, and an unconditional write is a state-file read and
+    // write per exchange for nothing.
+    if (digestDue()) setDigestDue(0, 0)
     return
   }
   if (!digestAt) baselineDigest() // first sight: report from here on
@@ -124,27 +133,43 @@ function scheduleDigest(o, to) {
 // armDigest starts the timer for the window: on fire it spends the
 // persisted due time, mails with the latest options seen, then arms the
 // next window.
+//
+// The step is capped: setTimeout (Bun and Node alike) clamps any delay
+// above 2^31-1 ms (24.8 days) to 1 ms with a TimeoutOverflowWarning, so a
+// monthly digest (report.hours: 720, 2,592,000,000 ms) used to fire at
+// once, clear the due time, send, and re-arm another 1 ms timer — a
+// digest on every exchange, flooding the host's log with warnings. A long
+// window is armed in capped steps instead: on wake, a due time still
+// ahead re-arms for the remainder; only a due time reached sends.
 function armDigest(wait, cur) {
+  const step = Math.min(wait, 2 ** 31 - 1)
+  digestStep = step
   digestTimer = setTimeout(() => {
     digestTimer = null
+    digestStep = 0
+    if (Date.now() < digestAt) {
+      armDigest(digestAt - Date.now(), cur) // still ahead: wait the rest
+      return
+    }
     digestAt = 0
     setDigestDue(0, 0)
     const c = latestDigest ?? cur
     sendDigest(c.o, c.to).catch(() => {})
     scheduleDigest(c.o, c.to) // arm the next window
-  }, wait)
+  }, step)
 }
 
 // digestScheduleForTests exposes the digest timer's state, and
 // resetDigestScheduleForTests clears it: production never calls either.
 export function digestScheduleForTests() {
-  return { at: digestAt, armed: digestTimer !== null }
+  return { at: digestAt, armed: digestTimer !== null, stepMs: digestStep }
 }
 export function resetDigestScheduleForTests() {
   if (digestTimer) clearTimeout(digestTimer)
   digestTimer = null
   digestAt = 0
   digestHours = 0
+  digestStep = 0
   latestDigest = null
 }
 

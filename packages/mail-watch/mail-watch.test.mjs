@@ -618,6 +618,21 @@ describe("hooks", () => {
     ...over,
   })
 
+  // waitFor polls until a state appears instead of sleeping a fixed
+  // duration: fixed waits race a loaded machine (and CI) — a poll returns
+  // as soon as the state is there and still passes when slow. A state
+  // read that throws (a file not written yet) counts as not ready.
+  const waitFor = async (ok, ms = 15000) => {
+    const deadline = Date.now() + ms
+    for (;;) {
+      try {
+        if (ok()) return true
+      } catch {}
+      if (Date.now() >= deadline) return false
+      await Bun.sleep(50)
+    }
+  }
+
   test("the digest timer is armed once: later exchanges don't move its due time", async () => {
     const o = quiet({ report: { hours: 6 } })
     await onResponse(null, { options: o, success: true })
@@ -632,7 +647,7 @@ describe("hooks", () => {
     expect(s3.armed).toBe(true)
     expect(s3.at).not.toBe(s1.at)
     await onResponse(null, { options: quiet(), success: true })
-    expect(digestScheduleForTests()).toEqual({ at: 0, armed: false })
+    expect(digestScheduleForTests()).toEqual({ at: 0, armed: false, stepMs: 0 })
     resetDigestScheduleForTests()
   })
 
@@ -651,16 +666,20 @@ describe("hooks", () => {
     }
     await onResponse(null, { options: o, success: true }) // baseline + arm
     writeFileSync(usage, JSON.stringify({ session: "eeeeeeee-5555", agent: "claude", provider: "p", model: "m", status: 200 }) + "\n")
-    // an exchange every 10 ms for ~500 ms: the old code re-armed on each
-    // and would not fire until ~800 ms; the fixed one fires at ~300 ms.
-    for (let i = 0; i < 50; i++) {
+    // exchanges keep coming; the digest must still fire on its original
+    // schedule instead of sliding with the traffic (the old code re-armed
+    // on each exchange and would not fire until the traffic stopped).
+    // Poll for the mail rather than a fixed span: under load the old
+    // fixed loop ran past the test timeout before the mail landed.
+    const deadline = Date.now() + 15000
+    while (got.body.length === 0 && Date.now() < deadline) {
       await onResponse(null, { options: o, success: true })
       await Bun.sleep(10)
     }
     expect(got.commands).toContain("DATA")
     expect(got.body.length).toBeGreaterThan(0)
     resetDigestScheduleForTests()
-  })
+  }, 20000)
 
   test("onResponse with a preset-only smtp still runs the scan", async () => {
     // the other half of the preset fix: send reading the resolved secure
@@ -680,11 +699,13 @@ describe("hooks", () => {
       watch: { errors: true, quotaExhausted: false, quotaLow: false },
     }
     await onResponse(null, { options: o, success: true })
-    await Bun.sleep(1700) // past the scan's 1.5 s pause
-    expect(JSON.parse(readFileSync(state, "utf8")).offset).toBe(Buffer.byteLength(rows))
+    // the scan's 1.5 s pause is a floor, not a schedule: poll for the
+    // state instead of sleeping past it (a fixed 1700 ms sleep left only
+    // 200 ms of room and failed under load).
+    expect(await waitFor(() => JSON.parse(readFileSync(state, "utf8")).offset === Buffer.byteLength(rows))).toBe(true)
     writeFileSync(usage, "")
     watch.forTests({ offset: 0 })
-  })
+  }, 20000)
 
   test("the digest survives a plugin host restart: the due time lives on disk", async () => {
     const port = await startSecure()
@@ -715,11 +736,46 @@ describe("hooks", () => {
       mod = await import(`./mail-watch.hooks.js?restart=${Date.now()}-${i}`)
       await mod.onResponse(null, { options: o, success: true })
     }
-    await Bun.sleep(1200) // past the original due time
+    // poll for the mail instead of sleeping a fixed span past the
+    // original due time, so a loaded machine still passes.
+    expect(await waitFor(() => got.body.length > 0)).toBe(true)
     expect(got.commands).toContain("DATA")
     // clean up: the fired digest re-armed the next window; drop it and
     // the persisted due time so later runs start clean.
     mod.resetDigestScheduleForTests()
+    const cleaned = JSON.parse(readFileSync(state, "utf8"))
+    delete cleaned.digestAt
+    delete cleaned.digestHours
+    writeFileSync(state, JSON.stringify(cleaned))
+    writeFileSync(usage, "")
+  }, 20000)
+
+  test("a monthly digest does not fire at once: the timer step is capped", async () => {
+    const port = await startSecure()
+    if (!port) return // no openssl on this machine
+    writeFileSync(usage, "")
+    const raw = JSON.parse(readFileSync(state, "utf8"))
+    delete raw.digestOffset
+    delete raw.digestAt
+    delete raw.digestHours
+    writeFileSync(state, JSON.stringify(raw))
+    const o = {
+      smtp: { host: "127.0.0.1", port, secure: true, insecure: true, from: "f@x.y" },
+      to: ["t@x.y"],
+      report: { hours: 720 }, // 2,592,000,000 ms: past setTimeout's 2^31-1 ms limit
+      watch: { errors: false, quotaExhausted: false, quotaLow: false },
+    }
+    await onResponse(null, { options: o, success: true })
+    const s = digestScheduleForTests()
+    expect(s.armed).toBe(true)
+    // the delay actually passed to setTimeout: capped, not the 2.59e9 ms
+    // the old code passed (which Bun/Node clamp to 1 ms with a warning,
+    // so the digest fired at once and re-armed another 1 ms timer).
+    expect(s.stepMs).toBe(2 ** 31 - 1)
+    // and nothing fires promptly: give it a chance to misfire, then check.
+    await Bun.sleep(300)
+    expect(got.commands).not.toContain("DATA")
+    resetDigestScheduleForTests()
     const cleaned = JSON.parse(readFileSync(state, "utf8"))
     delete cleaned.digestAt
     delete cleaned.digestHours
