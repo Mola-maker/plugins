@@ -17,7 +17,7 @@
 import { send, resolveSmtp } from "./smtp.js"
 import { fill, message, renderHtml } from "./template.js"
 import { fail, quotaScan, save, takeWithinCap } from "./watch.js"
-import { readDigest, baselineDigest } from "./digest.js"
+import { readDigest, baselineDigest, digestDue, setDigestDue } from "./digest.js"
 
 // one mail at a time, however many exchanges finish together
 let queue = Promise.resolve()
@@ -76,6 +76,17 @@ function schedule(o, to) {
 // it: the schedule itself changing (hours edited — re-arm with the new
 // wait), or the report being turned off (cancel). The fired digest mails
 // with the latest options seen, then arms the next window.
+//
+// The due time also lives on disk, next to digestOffset in the state
+// file: magpie restarts the plugin host when any plugin is installed,
+// updated, turned on or off, or has its options edited, when Bun
+// updates, and every time magpie itself restarts or updates. A due time
+// kept only in memory restarted the window on every one of those, so
+// with report.hours: 24 a user who updates magpie or any plugin once a
+// day never got a digest — the same outcome as the re-arm bug, by
+// another route. On arming, a persisted due time for the same schedule
+// that is still ahead is waited for; one already past sends now and arms
+// the next window. A changed schedule re-arms with the new wait.
 function scheduleDigest(o, to) {
   const hours = Number(o.report?.hours)
   if (!Number.isFinite(hours) || hours <= 0) {
@@ -83,6 +94,7 @@ function scheduleDigest(o, to) {
     digestTimer = null
     digestAt = 0
     digestHours = 0
+    setDigestDue(0, 0) // a disabled report leaves no due time behind
     return
   }
   if (!digestAt) baselineDigest() // first sight: report from here on
@@ -90,14 +102,36 @@ function scheduleDigest(o, to) {
   if (digestTimer && hours === digestHours) return // already armed: leave the due time alone
   if (digestTimer) clearTimeout(digestTimer)
   digestHours = hours
+  const persisted = digestDue()
+  if (persisted && persisted.hours === hours && persisted.at > Date.now()) {
+    digestAt = persisted.at
+    armDigest(digestAt - Date.now(), { o, to })
+    return
+  }
+  if (persisted && persisted.at <= Date.now()) {
+    // the host died before the due time: the window is owed now. The
+    // send reads from digestOffset, so a digest that already fired
+    // before the crash finds an empty window and mails nothing.
+    const cur = latestDigest
+    sendDigest(cur.o, cur.to).catch(() => {})
+  }
   const wait = hours * 3_600_000
   digestAt = Date.now() + wait
+  setDigestDue(digestAt, hours)
+  armDigest(wait, { o, to })
+}
+
+// armDigest starts the timer for the window: on fire it spends the
+// persisted due time, mails with the latest options seen, then arms the
+// next window.
+function armDigest(wait, cur) {
   digestTimer = setTimeout(() => {
     digestTimer = null
     digestAt = 0
-    const cur = latestDigest ?? { o, to }
-    sendDigest(cur.o, cur.to).catch(() => {})
-    scheduleDigest(cur.o, cur.to) // arm the next window
+    setDigestDue(0, 0)
+    const c = latestDigest ?? cur
+    sendDigest(c.o, c.to).catch(() => {})
+    scheduleDigest(c.o, c.to) // arm the next window
   }, wait)
 }
 

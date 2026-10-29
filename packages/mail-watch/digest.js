@@ -51,9 +51,36 @@ export function baselineDigest() {
   saveState(p, state)
 }
 
-// listed is whether provider is one the user asked for: an empty list is
-// every provider, a non-empty one only those on it (the same rule the
-// alerts use in watch.js).
+// digestDue reads the persisted due time: the moment the next digest
+// is owed, planted by the hook when it arms the schedule (see
+// mail-watch.hooks.js). The host process may end at any time — magpie
+// restarts the plugin host on every plugin install, update, toggle or
+// options edit, on Bun updates, and on magpie restarts — and a due time
+// kept only in memory would restart the window on every one of those.
+// Null when nothing is scheduled.
+export function digestDue() {
+  const p = paths()
+  const s = loadState(p)
+  const at = Number(s.digestAt)
+  if (!Number.isFinite(at) || at <= 0) return null
+  const hours = Number(s.digestHours)
+  return { at, hours: Number.isFinite(hours) && hours > 0 ? hours : 0 }
+}
+
+// setDigestDue plants (or, with a falsy at, clears) the persisted due
+// time next to digestOffset in the same state file.
+export function setDigestDue(at, hours) {
+  const p = paths()
+  const s = loadState(p)
+  if (at) {
+    s.digestAt = at
+    s.digestHours = hours
+  } else {
+    delete s.digestAt
+    delete s.digestHours
+  }
+  saveState(p, s)
+}
 function listed(list, provider) {
   if (!Array.isArray(list) || !list.length) return true
   return list.includes(provider)
@@ -81,6 +108,17 @@ export function readDigest(opts, now = Date.now()) {
     size = statSync(p.usage).size
   } catch {
     return { digest: emptyDigest(), since: now }
+  }
+  // a log shorter than remembered was cut or replaced (magpie itself
+  // never shortens it, but a user deleting it does): start over from
+  // the beginning and plant the reset, the way the alerts do — leaving
+  // the stale cursor would keep the digest silent until the log grew
+  // past the old size, and its first read would start mid-row.
+  if (size < offset) {
+    offset = 0
+    const reset = loadState(p)
+    reset.digestOffset = 0
+    saveState(p, reset)
   }
   const rows = []
   const buf = Buffer.alloc(Math.max(0, size - offset))

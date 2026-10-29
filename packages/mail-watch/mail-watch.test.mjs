@@ -502,6 +502,13 @@ describe("watch", () => {
     const ev = watch.quotaScan(o, 1000 + 241 * 60_000) // past the window: pruned, alerts again
     expect(ev).toHaveLength(1)
     expect(ev[0].provider).toBe("claude")
+    // the prune itself, not just the cooldown: a mark this scan never
+    // touches must be gone afterwards, or the map grows without bound.
+    // (The old test passed with pruning as a no-op: the cooldown alone
+    // re-fires the event, so it never proved the key was deleted.)
+    watch.forTests({ sent: { "error|stale|500": 1000 } })
+    watch.quotaScan(o, 1000 + 241 * 60_000)
+    expect(watch.forTests().sent["error|stale|500"]).toBeUndefined()
   })
 
   test("save writes atomically and leaves no temp file", () => {
@@ -563,10 +570,19 @@ describe("digest", () => {
     expect(Object.keys(digest.sessions)).toEqual(["dddddddd"])
   })
 
-  test("a log cut shorter than the digest cursor reads nothing", () => {
+  test("a log cut shorter than the digest cursor restarts from the start", () => {
     writeFileSync(usage, "x")
     const { digest } = readDigest({})
     expect(digest.rows).toBe(0)
+    // the stale cursor is reset, not kept: the next read starts at the
+    // beginning of the new log instead of staying silent until the log
+    // grows past the old size and then starting mid-row. (The old code
+    // returned nothing and left the cursor where it was; the old test
+    // locked that in.)
+    expect(JSON.parse(readFileSync(state, "utf8")).digestOffset).toBe(0)
+    const row = JSON.stringify({ session: "iiiiiiii-9999", agent: "claude", provider: "p", model: "m", status: 200 }) + "\n"
+    writeFileSync(usage, row)
+    expect(readDigest({}).digest.rows).toBe(1)
     writeFileSync(usage, "")
   })
 
@@ -644,5 +660,70 @@ describe("hooks", () => {
     expect(got.commands).toContain("DATA")
     expect(got.body.length).toBeGreaterThan(0)
     resetDigestScheduleForTests()
+  })
+
+  test("onResponse with a preset-only smtp still runs the scan", async () => {
+    // the other half of the preset fix: send reading the resolved secure
+    // is covered, but the onResponse gate reading the resolved host was
+    // not — putting the old guard back passed all tests. A preset-only
+    // config has no smtp.host of its own, so the old guard turned the
+    // exchange away before the scan ever ran. The scan here has no
+    // failing rows and sends nothing (no network): it proves itself by
+    // the state file's offset moving to the log's end.
+    const rows = JSON.stringify({ provider: "p", status: 200 }) + "\n" + JSON.stringify({ provider: "p", status: 200 }) + "\n"
+    writeFileSync(usage, rows)
+    writeFileSync(state, JSON.stringify({ offset: 0 }))
+    watch.forTests({ offset: 0, sent: {} })
+    const o = {
+      smtp: { preset: "qq", user: "u", pass: "p" },
+      to: ["t@x.y"],
+      watch: { errors: true, quotaExhausted: false, quotaLow: false },
+    }
+    await onResponse(null, { options: o, success: true })
+    await Bun.sleep(1700) // past the scan's 1.5 s pause
+    expect(JSON.parse(readFileSync(state, "utf8")).offset).toBe(Buffer.byteLength(rows))
+    writeFileSync(usage, "")
+    watch.forTests({ offset: 0 })
+  })
+
+  test("the digest survives a plugin host restart: the due time lives on disk", async () => {
+    const port = await startSecure()
+    if (!port) return // no openssl on this machine
+    writeFileSync(usage, "")
+    const raw = JSON.parse(readFileSync(state, "utf8"))
+    delete raw.digestOffset
+    delete raw.digestAt
+    delete raw.digestHours
+    writeFileSync(state, JSON.stringify(raw))
+    const o = {
+      smtp: { host: "127.0.0.1", port, secure: true, insecure: true, from: "f@x.y" },
+      to: ["t@x.y"],
+      report: { hours: 0.0005 }, // due 1.8 s after the first exchange
+      watch: { errors: false, quotaExhausted: false, quotaLow: false },
+    }
+    await onResponse(null, { options: o, success: true }) // baseline + arm, due persisted
+    writeFileSync(usage, JSON.stringify({ session: "hhhhhhhh-8888", agent: "claude", provider: "p", model: "m", status: 200 }) + "\n")
+    // the host restarts every 400 ms: the old module's timer is dropped
+    // (resetDigestScheduleForTests stands in for the process ending) and
+    // the hooks are imported fresh. The old code started the window
+    // again at now + hours on every restart and never fired; the due
+    // time on disk is waited for instead.
+    let mod = { onResponse, resetDigestScheduleForTests }
+    for (let i = 0; i < 3; i++) {
+      await Bun.sleep(400)
+      mod.resetDigestScheduleForTests()
+      mod = await import(`./mail-watch.hooks.js?restart=${Date.now()}-${i}`)
+      await mod.onResponse(null, { options: o, success: true })
+    }
+    await Bun.sleep(1200) // past the original due time
+    expect(got.commands).toContain("DATA")
+    // clean up: the fired digest re-armed the next window; drop it and
+    // the persisted due time so later runs start clean.
+    mod.resetDigestScheduleForTests()
+    const cleaned = JSON.parse(readFileSync(state, "utf8"))
+    delete cleaned.digestAt
+    delete cleaned.digestHours
+    writeFileSync(state, JSON.stringify(cleaned))
+    writeFileSync(usage, "")
   })
 })
