@@ -4,23 +4,22 @@
 // agent copies no file bytes; a checkpoint stores only what changed.
 // Arguments are JSON Schema, so the package needs no dependency.
 //
-// The page's data channel: magpie serves a plugin page's files from the
-// plugin's folder as they sit on disk, so after the calls that change the
-// store the tools rewrite trajectory-live.js in the plugin's data folder
-// (page-data.mjs; the installed page/ is a link to it) from
-// backend.trajectory() — the page's real commits, branches, storage and
-// dedup accounting, with the real calling agent on each. See the README's
-// page section.
+// The page's data channel: the plugin host's own localhost-only service
+// (page-service.mjs). A magpie page cannot fetch and cannot read
+// plugin-private files, so the installed page/index.html only navigates
+// its frame to the service, which embeds backend.trajectory() — the
+// page's real commits, branches, storage and dedup accounting, with the
+// real calling agent on each — in the HTML it returns. The service
+// starts only once a store exists; see the README's page section.
 //
 // Backend: a local content-addressed store with the LayerFS model, in
 // layerfs.mjs. The native backend (the real LayerFS SDK) is not shipped
 // in this registry package — the SDK is still not published to npm —
 // and returns once the plugin can pin it as a dependency. See the README.
-import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs"
-import { basename, dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { readdirSync } from "node:fs"
+import { join } from "node:path"
 import { checkBranch, checkInnerPath, checkProject, checkSourceDir, createBackend, storeHome } from "./layerfs.mjs"
-import { LIVE, dataDir, ensurePageData } from "./page-data.mjs"
+import { resolvePagePort, startPageService } from "./page-service.mjs"
 
 const str = (v, name) => {
   if (typeof v !== "string" || !v) throw new Error(`${name} is a non-empty string`)
@@ -38,125 +37,51 @@ const callingAgent = (ctx) => {
   return typeof a === "string" && a.trim() ? a.trim().slice(0, 40) : ""
 }
 
-// ---- the page's live trajectory ------------------------------------------
-// magpie serves a page's files from the plugin's folder per request, as they
-// sit on disk, so a file the tools keep current IS a data channel: after the
-// calls that change the store, backend.trajectory() is rebuilt and written
-// to trajectory-live.js in the data folder (page-data.mjs) — tmp-then-
-// renamed, so the page never loads a half-written file; the installed page/
-// is a link to that folder. The page loads it after the bundled sample and
-// prefers it; an empty store writes an empty live file, and the page shows
-// its honest empty state instead of the demo. The write is debounced and off
-// the calls' critical path, errors swallowed — the page keeps its last
-// file, the tool calls are untouched. MAGPIE_LAYERFS_PAGE_DIR moves the
-// folder (the tests point it at a scratch dir).
-const LIVE_DEBOUNCE_MS = 1200
-
-// The folder the live write lands in: the folder the host actually
-// serves the page from. An install serves the page through the link the
-// swap laid, so its live write lands in the data directory. A bare
-// development checkout — never swapped, no install wired — serves its
-// own page/, so the write lands there. MAGPIE_LAYERFS_PAGE_DIR keeps
-// the tests' handle on the folder actually served and wins over both.
-const here0 = dirname(fileURLToPath(import.meta.url))
-// A development checkout: a .git at the package's own folder or any
-// folder above it, before node_modules gets in the way. The registry
-// package lives in a monorepo, so its checkout's .git sits at the
-// repository root, not beside index.mjs; an installed copy has only
-// node_modules above it (bun's installs carry no .git anywhere along
-// the way), so the walk stops there and the copy counts as an install.
-const isCheckout = (() => {
-  let d = here0
-  for (;;) {
-    if (existsSync(join(d, ".git"))) return true
-    if (d === dirname(d) || basename(d) === "node_modules") return false
-    d = dirname(d)
-  }
-})()
-const pageDir = () =>
-  process.env.MAGPIE_LAYERFS_PAGE_DIR
-  || (isCheckout && !process.env.MAGPIE_LAYERFS_INSTALL_DIR ? join(here0, "page") : dataDir())
+// ---- the page's live channel: the host's own service ---------------------
+// The service starts once per plugin instance, and only once a store
+// exists — two read-only gates, so a user with no store gets no service
+// and nothing written anywhere: a projects folder that holds entries
+// (not merely exists; the backend's constructor mkdirs it), and a
+// non-empty answer from the backend that will serve the calls. A host
+// whose store gains its first project later starts the service after
+// the call that created it (mutate, below). The start is off the tool
+// calls' path and every failure is swallowed: a held port or a failed
+// read leaves the tools untouched, and the page's redirect simply finds
+// nothing listening.
 
 export const LayerfsTools = async (ctx = {}, options = {}) => {
   let backendPromise
   const backend = () => (backendPromise ??= createBackend(process.env, options))
   const execEnabled = () => options?.exec === true || process.env.MAGPIE_LAYERFS_EXEC === "1"
-  // Lay the page's data-channel swap once per host start: idempotent,
-  // off the tool calls' path, every failure keeps the bundled sample.
-  // The install is this package's own folder as the host has it — the
-  // module's own directory — but never a development checkout: one has
-  // a .git at or above it (installs sit under node_modules and carry
-  // none), so a checkout is only seeded, never swapped.
-  // MAGPIE_LAYERFS_INSTALL_DIR overrides the install for the tests.
-  const here = here0
-  const installDir = process.env.MAGPIE_LAYERFS_INSTALL_DIR || (isCheckout ? null : here)
-  if (installDir) ensurePageData(installDir).catch(() => { /* the page falls back to the sample */ })
-  else if (process.env.MAGPIE_LAYERFS_PAGE_DIR === undefined)
-    ensurePageData(null, { swap: false }).catch(() => { /* seed only */ })
   // A call touches only the state its own operation needs. Reads (history,
-  // resolve, status) change nothing and refresh nothing.
+  // resolve, status) change nothing and start nothing.
   const call = async (fn) => {
     const b = await backend()
     return fn(b)
   }
-  // The live trajectory, per plugin instance: a trailing debounce coalesces
-  // a burst of parallel agents' calls into one rebuild-and-write. The file
-  // persists in the data folder, so it is already current when the app (and
-  // the host) restarts; the one startup refresh below covers the first
-  // start with no file yet.
-  let liveTimer = null, liveInFlight = false, livePending = false
-  const writeTrajectory = (data, dir) => {
-    mkdirSync(dir, { recursive: true })
-    const tmp = join(dir, `${LIVE}.tmp`)
-    writeFileSync(tmp, `globalThis.LayerfsTrajectory = ${JSON.stringify(data)};\n`)
-    renameSync(tmp, join(dir, LIVE))
+  // The page's service, started once: the gates above, then a listen on
+  // the configured port (options.pagePort, MAGPIE_LAYERFS_PAGE_PORT,
+  // else the default). A second call while the first service lives is
+  // a no-op; a failed start stays failed for this instance, quietly.
+  let service = null
+  const ensureService = async () => {
+    if (service) return
+    let hasEntries = false
+    try { hasEntries = readdirSync(join(storeHome(), "projects")).length > 0 } catch { /* no store yet */ }
+    if (!hasEntries) return
+    let data
+    try { data = await (await backend()).trajectory() } catch { return }
+    if (!data.projects.length) return
+    service = startPageService({ backend: await backend(), port: resolvePagePort(options) })
   }
-  const writeLive = async (b, dir = pageDir()) => writeTrajectory(await b.trajectory(), dir)
-  const scheduleLive = (b) => {
-    // The dir is read at schedule time, not fire time: the env can
-    // change under the timer (a test suite's per-test env), and the
-    // write belongs to the store the call landed in.
-    const dir = pageDir()
-    livePending = true
-    if (liveTimer || liveInFlight) return
-    liveTimer = setTimeout(() => {
-      liveTimer = null
-      liveInFlight = true
-      writeLive(b, dir)
-        .catch(() => { /* the page keeps its last file; the tools are untouched */ })
-        .finally(() => {
-          liveInFlight = false
-          if (livePending) { livePending = false; scheduleLive(b) }
-        })
-    }, LIVE_DEBOUNCE_MS)
-  }
-  // A mutating call refreshes the page's live trajectory after it lands.
+  ensureService().catch(() => { /* no service: the tools are untouched */ })
+  // A mutating call may have created the store's first project: offer
+  // the service its start, off the call's path.
   const mutate = async (fn) => {
     const b = await backend()
     const out = await fn(b)
-    try { scheduleLive(b) } catch { /* never on the tool call's path */ }
+    ensureService().catch(() => { /* never on the tool call's path */ })
     return out
-  }
-  // The first host start with a live channel may have no live file yet:
-  // the page would show the bundled sample until an agent's next call. If
-  // the user already has committed work, write it once now. Both checks
-  // are read-only on disk — a store that holds no project entries is left
-  // untouched, and the backend is built only when one does (its
-  // constructor is what creates a missing store). What the backend
-  // answers decides the write, so work it cannot see never overwrites
-  // the page with an empty picture.
-  const startupDir = pageDir()
-  if (!existsSync(join(startupDir, LIVE))) {
-    const home = storeHome()
-    const holders = [join(home, "projects")]
-    const hasEntries = holders.some((p) => {
-      try { return readdirSync(p).length > 0 } catch { return false }
-    })
-    if (hasEntries)
-      backend()
-        .then((b) => b.trajectory())
-        .then((data) => { if (data.projects.length > 0) writeTrajectory(data, startupDir) })
-        .catch(() => { /* the page keeps the sample */ })
   }
 
   return {

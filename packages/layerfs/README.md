@@ -167,33 +167,39 @@ finished picture, every icon fully drawn.
 
 A magpie page cannot fetch, and the bridge's reads are a fixed host
 list (`usage:summary`, `providers:list`) with no entry a plugin can
-serve its own data through — but magpie serves a page's files from the
-plugin's folder as they sit on disk, per request. So the tools keep a
-live recording the page loads as a script beside the bundled sample:
+serve its own data through — but magpie lets a page navigate its
+frame elsewhere, and pulls a plugin's host part up the moment its
+page is requested, waiting up to 7 seconds for it (pageHost /
+plugin.Warm). So the page's live channel is the host's own
+localhost-only service (`page-service.mjs`), the way page-chat
+serves its chat page:
 
-- **The live data lives in the plugin's data directory** — beside the
-  store (`MAGPIE_LAYERFS_DATA_DIR` moves it), never inside the install.
-  On the first `LayerfsTools()` of a host start, an idempotent
-  `ensurePageData` (`page-data.mjs`) copies the bundled page files
-  there once and points the installed package's `page/` at that folder
-  — a junction on Windows, a symlink elsewhere — so the host's
-  per-request disk serving reads through it and the tools' live writes
-  land outside the install. A development checkout (a `.git` at or
-  above the package) is never swapped, only seeded; an install whose
-  page folder cannot be swapped (read-only, a filesystem without
-  junctions) falls back to the bundled sample, silently.
-- **After every mutating call the tools rewrite `trajectory-live.js`**
-  from `backend.trajectory()` — tmp-then-renamed, debounced, off the
-  tool calls' path, errors swallowed (the page keeps its last file).
-  The page loads it after the bundled sample and prefers it; an empty
-  store writes an empty live file, and the page shows its honest empty
-  state instead of the demo. The first start of a host whose store
-  already holds a project writes it once, so the page is live from the
-  first open, not from the first tool call.
+- **The installed page only jumps.** `page/index.html` does one
+  thing: it reads the port from the plugin's options
+  (`pagePort`, default 43717) and `location.replace`s its frame to
+  `http://127.0.0.1:<port>/`. The install's folder is never
+  renamed, linked, or written into. A user with no store gets no
+  service and nothing written anywhere.
+- **The service returns the page with its data inside.** Each
+  request rebuilds `backend.trajectory()` on demand and answers one
+  route, GET /, as HTML: the trajectory UI with the recording
+  embedded as `<script type="application/json" id="data">`, which
+  the page reads from the DOM — never by fetch. The page reloads
+  itself every few seconds, and every reload is a fresh navigation,
+  so the picture stays live. An empty store answers an empty
+  trajectory, and the page shows its honest empty state.
+- **The service is closed to other sites.** It emits no CORS
+  headers and refuses any request carrying an Origin (a sandboxed
+  iframe's fetch sends `Origin: null`); it serves no `.js` data
+  file another site could `<script src>` — only `text/html` with
+  `X-Content-Type-Options: nosniff`; and it checks Host, answering
+  only `127.0.0.1:<port>` and `localhost:<port>`, so a
+  DNS-rebinding name is refused. Another site can at most frame
+  the page; it cannot read it.
 - **An Agent activity table** under the replay lists every recorded
   tool call — the calling agent, the tool, the project, the branch and
-  the time, newest last. The bundled sample carries no events, so the
-  section hides itself there; all four locales carry the strings.
+  the time, newest last. With no recorded calls the table gives way
+  to an empty note; all four locales carry the strings.
 
 `backend.trajectory()` itself is computed on demand from the store's
 records whenever it is asked for (`tools/gen-trajectory.mjs` uses it
@@ -226,28 +232,30 @@ package's folder — an update replaces that folder, two hosts with one
 install race on the same file, and an install can be read-only — but its
 conclusion, a page that only ever shows the bundled sample, threw away
 the real trajectory every desktop had been watching. This version
-answers both sides at once:
+answers both sides at once, the way page-chat serves its page:
 
-- **The live data lives in the plugin's data directory** — beside the
-  store (`MAGPIE_LAYERFS_DATA_DIR` moves it), and the installed `page/`
-  is pointed at it once, by an idempotent swap (a junction on Windows,
-  a symlink elsewhere) that every failure path undoes into the bundled
-  sample. Nothing ever writes into the install itself.
+- **The host serves the page itself.** The installed `page/` is
+  never renamed, linked, or written into: `page/index.html` only
+  navigates its frame to a localhost-only service the host starts
+  (`page-service.mjs`, port `pagePort`, default 43717), which
+  returns the trajectory UI with the live recording embedded in
+  the HTML. The page reloads itself every few seconds, so the
+  picture stays live without any file channel.
 - **The page gains an Agent activity table** — every recorded tool
   call, with the calling agent, the tool, the project, the branch and
   the time — so each round's work is visible per agent, not only as
   commits on a graph.
-- **The first start of a host whose store already holds a project
-  writes the live file once** (two read-only gates: a projects folder
-  that holds entries, and a non-empty answer from the backend that
-  will serve the calls), so an upgrade shows the user's real work on
-  the first open instead of the sample until the next tool call.
-- `ensurePageData` lives in `page-data.mjs`, not the entry module: the
-  plugin host takes every function the entry exports for an OpenCode
-  plugin factory and calls it at load, so the entry exports
-  `LayerfsTools` alone (the standalone repo shipped 0.10.0 with the
-  helper in the entry and the whole plugin failed to load — this is
-  that lesson, applied here from the start).
+- **The service starts only once a store exists** (two read-only
+  gates: a projects folder that holds entries, and a non-empty
+  answer from the backend that will serve the calls), so an upgrade
+  shows the user's real work on the first open, and a user with no
+  store gets no service and nothing written anywhere.
+- `startPageService` lives in `page-service.mjs`, not the entry
+  module: the plugin host takes every function the entry exports for
+  an OpenCode plugin factory and calls it at load, so the entry
+  exports `LayerfsTools` alone (the standalone repo shipped 0.10.0
+  with the helper in the entry and the whole plugin failed to load
+  — this is that lesson, applied here from the start).
 
 ## Changes in 0.9.0
 

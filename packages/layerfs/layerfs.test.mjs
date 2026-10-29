@@ -1,9 +1,11 @@
 import { afterAll, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
   rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs"
+import { get as httpGet } from "node:http"
+import { createServer as netServer, connect as netConnect } from "node:net"
 import { homedir, tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { LayerfsTools } from "./index.mjs"
@@ -33,6 +35,12 @@ afterAll(() => {
   Object.assign(process.env, envSnapshot)
 }, 120_000)
 
+// Suite hygiene (0.10.0 review, item 3): no test may touch the real
+// HOME — the first test calls LayerfsTools with no env at all, so the
+// suite pins a scratch home before any test runs; simTools still gives
+// each test its own home.
+process.env.MAGPIE_LAYERFS_HOME = mkTmp("layerfs-suite-home-")
+
 function fixture() {
   const src = mkTmp("layerfs-src-")
   mkdirSync(join(src, "docs"), { recursive: true })
@@ -51,36 +59,80 @@ async function simTools(opts = { exec: true }) {
   delete process.env.MAGPIE_LAYERFS_EXEC2
   delete process.env.MAGPIE_LAYERFS_INSTALL_DIR
   delete process.env.MAGPIE_LAYERFS_DATA_DIR
-  const page = mkTmp("layerfs-page-")
-  process.env.MAGPIE_LAYERFS_PAGE_DIR = page
+  delete process.env.MAGPIE_LAYERFS_PAGE_DIR
+  delete process.env.MAGPIE_LAYERFS_PAGE_PORT
+  // Each instance gets its own service port: the host starts one per
+  // LayerfsTools(), and two instances sharing a port would leave the
+  // second silently serviceless.
+  const port = await freePort()
   const src = fixture()
   // ctx.directory is magpie's CONFIG directory in the real host — the
   // harness models it as its own temp dir, never the source
-  const { tool } = await LayerfsTools({ directory: mkTmp("magpie-config-") }, opts)
+  const { tool } = await LayerfsTools({ directory: mkTmp("magpie-config-") }, { ...opts, pagePort: port })
   // provision's source is a required argument since 0.7.0: the wrapper
   // passes the fixture explicitly, the way a caller now must
   const call = (name, args) => tool[name].execute(
     name === "provision" && args.source === undefined ? { ...args, source: src } : args,
     { agent: "test", abort: AbortSignal.timeout(5000) })
-  return { call, home, src, tool, page }
+  return { call, home, src, tool, port, url: `http://127.0.0.1:${port}/` }
 }
 
-// A page file copied into a staged install or an expected folder.
-const copyFileSyncSafe = (f, from, to) => copyFileSync(join(from, f), join(to, f))
+// A port nothing holds right now: bind 0, read it back, let go. The
+// window between release and the service's bind is small, and a test
+// that polls the service fails loudly if it ever loses the race.
+const freePort = () => new Promise((resolve, reject) => {
+  const s = netServer()
+  s.once("error", reject)
+  s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)) })
+})
 
-async function liveData(page, want, ms = 8000) {  const live = join(page, "trajectory-live.js")
+// Poll the service until its embedded trajectory holds the expected
+// state: the service starts off the tool calls' path, so a test that
+// needs it waits for the state, not for a fixed duration.
+async function serviceData(url, want, ms = 8000) {
   const deadline = Date.now() + ms
   for (;;) {
-    if (existsSync(live)) {
-      try {
-        const data = JSON.parse(readFileSync(live, "utf8").replace(/^globalThis\.LayerfsTrajectory = |;\n$/g, ""))
-        if (want(data)) return data
-      } catch { /* a mid-rename read, or an earlier state */ }
-    }
-    if (Date.now() > deadline) throw new Error("live trajectory never held the expected state")
+    try {
+      const res = await fetch(url)
+      if (res.ok) {
+        const html = await res.text()
+        const m = html.match(/<script type="application\/json" id="data">(.*?)<\/script>/s)
+        if (m) {
+          const data = JSON.parse(m[1])
+          if (want(data)) return { data, html }
+        }
+      }
+    } catch { /* the service is not up yet */ }
+    if (Date.now() > deadline) throw new Error("the service never served the expected state")
     await new Promise((r) => setTimeout(r, 50))
   }
 }
+
+// One GET with caller-chosen headers: the Origin check's own test
+// needs the header set, which fetch would also do — but this keeps the
+// status, headers and body together for the assertions.
+const get = (url, headers = {}) => new Promise((resolve, reject) => {
+  const req = httpGet(url, { headers }, (res) => {
+    let body = ""
+    res.on("data", (c) => (body += c))
+    res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body }))
+  })
+  req.on("error", reject)
+  req.end()
+})
+
+// One raw request with an explicit Host header: a client library would
+// overwrite it with the target, and the Host check's test needs the
+// header to say something other than the loopback it connects to.
+const rawRequest = (port, host, path = "/") => new Promise((resolve, reject) => {
+  let buf = ""
+  const sock = netConnect(port, "127.0.0.1", () => {
+    sock.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)
+  })
+  sock.on("data", (c) => (buf += c))
+  sock.on("end", () => resolve(buf))
+  sock.on("error", reject)
+})
 
 test("gives eight tools, each with a JSON Schema and an execute", async () => {
   const { tool } = await LayerfsTools({})
@@ -640,86 +692,89 @@ test("#360: a legacy root the user made a link is used where it is", () => {
   expect(existsSync(join(home, DEFAULT_ROOT))).toBe(false)
 })
 
-// ---- 0.10.0: the live data channel lives in the plugin's data directory ----
+// ---- 0.10.0: the page is served by the host's own localhost service ----
 // The 0.9.0 review holds: nothing writes into the installed plugin's own
-// folder. The tools keep the live trajectory in the plugin's data
-// directory (MAGPIE_LAYERFS_DATA_DIR, default beside the store root) and
-// point the installed page's folder at it — a junction on Windows, a
-// symlink elsewhere — swapped in once per install (an idempotent
-// ensurePageData, off the tool calls' path). MAGPIE_LAYERFS_PAGE_DIR
-// still moves the folder the tests point at.
+// folder — no live file, no link, no rename. The host serves the page
+// itself (page-service.mjs): the installed page/index.html only
+// navigates its frame to it, and the service embeds backend.trajectory()
+// in the HTML it returns. The tests below drive the service over HTTP
+// the way a browser would, and the install folder is asserted untouched
+// by the run.
 
-test("0.10.0: the live trajectory is written to the data directory, never the install folder", async () => {
-  const home = mkTmp("layerfs-home-")
-  const install = mkTmp("layerfs-install-") // models the installed package
-  const data = join(mkTmp("layerfs-data-"), "page-data")
-  process.env.MAGPIE_LAYERFS_HOME = home
-  process.env.MAGPIE_LAYERFS_BACKEND = "sim"
-  delete process.env.MAGPIE_LAYERFS_PAGE_DIR
-  process.env.MAGPIE_LAYERFS_DATA_DIR = data
-  // an installed-looking page folder: the bundled sample files. The
-  // install is wired in explicitly — without it the checkout guard
-  // leaves this fake install untouched and the assertions are vacuous.
-  mkdirSync(join(install, "page"), { recursive: true })
-  for (const f of ["index.html", "trajectory.js"])
-    copyFileSyncSafe(f, join(import.meta.dir, "page"), join(install, "page"))
-  process.env.MAGPIE_LAYERFS_INSTALL_DIR = install
-  const { tool } = await LayerfsTools({ directory: mkTmp("magpie-config-") }, {})
-  await tool.provision.execute({ project: "website", source: fixture() }, { agent: "r4", abort: AbortSignal.timeout(5000) })
-  // the ensure step laid, the install's page IS the data dir: the live
-  // file read through the link
-  const d = await liveData(data, (x) => !!x.projects.find((p) => p.name === "website"))
-  expect(d.projects.at(-1).name).toBe("website")
-  // nothing was written INTO the install: the page folder holds only the
-  // bundled files (as a junction it serves the data dir, never gains a
-  // live file of its own; a failed swap keeps the real folder below)
-  const pageSt = lstatSync(join(install, "page"))
-  if (!pageSt.isSymbolicLink())
-    expect(existsSync(join(install, "page", "trajectory-live.js"))).toBe(false)
-  // the shipped sample file inside the install is byte-identical to the
-  // repo's (the swap must not rewrite bundled files)
-  expect(readFileSync(join(install, "page", "trajectory.js"), "utf8")).toBe(
-    readFileSync(join(import.meta.dir, "page", "trajectory.js"), "utf8"))
+test("0.10.0: the service serves the live trajectory, and tool calls write nothing into the package's page folder", async () => {
+  const { call, url } = await simTools()
+  const before = readdirSync(join(import.meta.dir, "page")).sort()
+  await call("provision", { project: "website" })
+  const { data, html } = await serviceData(url, (x) => !!x.projects.find((p) => p.name === "website"))
+  expect(data.projects.at(-1).name).toBe("website")
+  expect(html).toContain('id="graph"')
+  expect(html).toContain("location.reload()") // the page refreshes itself for liveness
+  // the answer's shape: HTML only, no-store, nosniff, and no CORS
+  const res = await fetch(url)
+  expect(res.status).toBe(200)
+  expect(res.headers.get("content-type")).toContain("text/html")
+  expect(res.headers.get("x-content-type-options")).toBe("nosniff")
+  expect(res.headers.get("cache-control")).toContain("no-store")
+  expect(res.headers.get("access-control-allow-origin")).toBeNull()
+  // the package's own page folder is exactly as it was: no live file,
+  // no link, nothing renamed in or out
+  expect(readdirSync(join(import.meta.dir, "page")).sort()).toEqual(before)
+  const st = lstatSync(join(import.meta.dir, "page"))
+  expect(st.isSymbolicLink()).toBe(false)
+  expect(st.isDirectory()).toBe(true)
 }, 30000)
 
-test("0.10.0: ensurePageData points the install's page folder at the data directory and serves every file", async () => {
-  const home = mkTmp("layerfs-home-")
-  const install = mkTmp("layerfs-install-")
-  const data = mkTmp("layerfs-data-")
-  process.env.MAGPIE_LAYERFS_HOME = home
-  process.env.MAGPIE_LAYERFS_BACKEND = "sim"
-  delete process.env.MAGPIE_LAYERFS_PAGE_DIR
-  process.env.MAGPIE_LAYERFS_DATA_DIR = data
-  // stage an installed-looking plugin: page/ beside index.mjs
-  mkdirSync(join(install, "page"), { recursive: true })
-  for (const f of readdirSync(join(import.meta.dir, "page")))
-    if (f !== "trajectory-live.js") copyFileSyncSafe(f, join(import.meta.dir, "page"), join(install, "page"))
-  // run the ensure step the way the host's first LayerfsTools() does
-  const { ensurePageData } = await import("./page-data.mjs")
-  const served = await ensurePageData(install)
-  expect(served).toBe(data)
-  // every bundled page file is reachable through the junction, byte-identical
-  for (const f of readdirSync(join(import.meta.dir, "page"))) {
-    if (f === "trajectory-live.js") continue
-    expect(existsSync(join(served, f))).toBe(true)
-    expect(readFileSync(join(served, f), "utf8")).toBe(readFileSync(join(import.meta.dir, "page", f), "utf8"))
+test("0.10.0: the service refuses cross-origin reads, foreign hosts, and non-root routes", async () => {
+  const { call, url, port } = await simTools()
+  await call("provision", { project: "website" })
+  await serviceData(url, (x) => !!x.projects.find((p) => p.name === "website"))
+  // a sandboxed iframe's fetch sends Origin: null; a real site's sends
+  // its own origin — both are refused, and neither gets CORS headers
+  for (const origin of ["null", "https://evil.example"]) {
+    const r = await get(url, { origin })
+    expect(r.status).toBe(403)
+    expect(r.headers["access-control-allow-origin"]).toBeUndefined()
   }
-  // idempotent: a second call is a no-op
-  const st = lstatSync(served)
-  expect(await ensurePageData(install)).toBe(served)
-  expect(lstatSync(served).ino).toBe(st.ino)
-  // the page folder of the install IS the data dir now (readable through both)
-  expect(existsSync(join(install, "page", "trajectory.js"))).toBe(true)
+  // a DNS-rebinding name arrives with the attacker's Host
+  const evil = await rawRequest(port, `evil.example:${port}`)
+  expect(evil).toMatch(/^HTTP\/1\.1 403/)
+  // the loopback names pass, as does a plain navigation (no Origin)
+  const local = await rawRequest(port, `localhost:${port}`)
+  expect(local).toMatch(/^HTTP\/1\.1 200/)
+  const plain = await get(url)
+  expect(plain.status).toBe(200)
+  // there is no .js data file to steal, and no asset route at all
+  for (const p of ["trajectory-live.js", "app.js", "view.js", "style.css", "trajectory.html"]) {
+    expect((await get(`${url}${p}`)).status).toBe(404)
+  }
 }, 30000)
 
-test("0.10.0: the page's live file carries per-agent tool-call events", async () => {
-  const { call, page } = await simTools()
+test("0.10.0: a commit message cannot break out of the embedded data script", async () => {
+  const { call, url } = await simTools()
+  const evil = "x</script><script>alert(1)</script>y"
+  await call("provision", { project: "website" })
+  await call("checkpoint", { project: "website", message: evil })
+  const { data, html } = await serviceData(url,
+    (x) => (x.projects.find((p) => p.name === "website")?.branches.find((b) => b.name === "main")?.commits ?? [])
+      .some((c) => c.message === evil))
+  // the breakout is escaped in the raw HTML, and parses back whole
+  expect(html).not.toContain("</script><script>alert(1)")
+  const commit = data.projects.find((p) => p.name === "website").branches
+    .find((b) => b.name === "main").commits.find((c) => c.message === evil)
+  expect(commit.message).toBe(evil)
+}, 30000)
+
+test("0.10.0: the served trajectory carries per-agent tool-call events", async () => {
+  const { call, url } = await simTools()
   await call("provision", { project: "website" })
   await call("fork", { project: "website", branch: "claude", from: "main" })
   const ws = await call("provision", { project: "website", branch: "claude" })
   writeFileSync(join(ws.path, "x.txt"), "x\n")
   await call("checkpoint", { project: "website", branch: "claude", message: "agent work" })
-  const data = await liveData(page, (d) => (d.events ?? []).some((e) => e.kind === "checkpoint" && e.agent === "test"))
+  // wait for the checkpoint this test asserts — the one on the claude
+  // branch — not for any write or any event that happens to arrive
+  const { data } = await serviceData(url,
+    (d) => (d.events ?? []).some((e) => e.kind === "checkpoint" && e.branch === "claude"))
   // each event names the calling agent, the tool kind, project, branch and time
   const e = data.events.filter((x) => x.kind === "checkpoint").at(-1)
   expect(e.agent).toBe("test")
@@ -729,49 +784,37 @@ test("0.10.0: the page's live file carries per-agent tool-call events", async ()
   // provision events carry the workspace path
   const p = data.events.find((x) => x.kind === "provision")
   expect(p.path).toContain("website")
-})
+}, 30000)
 
-test("0.10.0: the startup write is gated on real projects — empty or foreign folders write nothing", async () => {
+test("0.10.0: the service starts only once a store exists — empty or foreign folders start nothing", async () => {
   const home = mkTmp("layerfs-home-")
-  const page = mkTmp("layerfs-page-")
   process.env.MAGPIE_LAYERFS_HOME = home
   process.env.MAGPIE_LAYERFS_BACKEND = "sim"
-  process.env.MAGPIE_LAYERFS_PAGE_DIR = page
   delete process.env.MAGPIE_LAYERFS_INSTALL_DIR
   delete process.env.MAGPIE_LAYERFS_DATA_DIR
-  // (a) a projects folder holding nothing: no write, and the backend is
-  // never built — its constructor is what creates the rest of the store
-  mkdirSync(join(home, "projects"))
-  const { LayerfsTools: Empty } = await import("./index.mjs?startup-empty")
-  await Empty({ directory: mkTmp("magpie-config-") }, {})
-  await new Promise((r) => setTimeout(r, 300))
-  expect(existsSync(join(page, "trajectory-live.js"))).toBe(false)
-  expect(existsSync(join(home, "store"))).toBe(false)
-  // (b) an entry that is no project: the backend's own answer decides, so
-  // the page keeps its sample instead of an empty picture
-  writeFileSync(join(home, "projects", "not-a-project.txt"), "x")
-  const { LayerfsTools: Foreign } = await import("./index.mjs?startup-foreign")
-  await Foreign({ directory: mkTmp("magpie-config-") }, {})
-  await new Promise((r) => setTimeout(r, 300))
-  expect(existsSync(join(page, "trajectory-live.js"))).toBe(false)
-})
-
-test("0.10.0: a development checkout is never swapped — only the install is", async () => {
-  const home = mkTmp("layerfs-home-")
-  const data = mkTmp("layerfs-data-")
-  process.env.MAGPIE_LAYERFS_HOME = home
-  process.env.MAGPIE_LAYERFS_BACKEND = "sim"
   delete process.env.MAGPIE_LAYERFS_PAGE_DIR
-  delete process.env.MAGPIE_LAYERFS_INSTALL_DIR
-  process.env.MAGPIE_LAYERFS_DATA_DIR = data
-  const { LayerfsTools: FreshTools } = await import("./index.mjs?checkout-guard")
-  await FreshTools({ directory: mkTmp("magpie-config-") }, {})
-  await new Promise((r) => setTimeout(r, 200)) // the ensure is off the calls' path
-  // this file's own directory is the checkout: its page/ is still a real folder
-  const st = lstatSync(join(import.meta.dir, "page"))
-  expect(st.isSymbolicLink()).toBe(false)
-  expect(st.isDirectory()).toBe(true)
-  // and the data copy was seeded anyway (from the checkout's own page/)
-  expect(existsSync(join(data, "app.js"))).toBe(true)
-  expect(existsSync(join(data, "index.html"))).toBe(true)
-})
+  // (a) a projects folder holding nothing: no service, and the backend
+  // is never built — its constructor is what creates the rest of the store
+  mkdirSync(join(home, "projects"))
+  const portA = await freePort()
+  await LayerfsTools({ directory: mkTmp("magpie-config-") }, { pagePort: portA })
+  await new Promise((r) => setTimeout(r, 300))
+  await expect(fetch(`http://127.0.0.1:${portA}/`)).rejects.toThrow()
+  expect(existsSync(join(home, "store"))).toBe(false)
+  // (b) an entry that is no project: the backend's own answer decides,
+  // so nothing listens
+  writeFileSync(join(home, "projects", "not-a-project.txt"), "x")
+  const portB = await freePort()
+  await LayerfsTools({ directory: mkTmp("magpie-config-") }, { pagePort: portB })
+  await new Promise((r) => setTimeout(r, 300))
+  await expect(fetch(`http://127.0.0.1:${portB}/`)).rejects.toThrow()
+  // (c) a real project: one instance provisions it, and a fresh instance
+  // on the same home serves it from the factory call, no tool call needed
+  const portD = await freePort()
+  const { tool } = await LayerfsTools({ directory: mkTmp("magpie-config-") }, { pagePort: portD })
+  await tool.provision.execute({ project: "website", source: fixture() }, { agent: "test", abort: AbortSignal.timeout(5000) })
+  const portE = await freePort()
+  await LayerfsTools({ directory: mkTmp("magpie-config-") }, { pagePort: portE })
+  const { data } = await serviceData(`http://127.0.0.1:${portE}/`, (x) => !!x.projects.find((p) => p.name === "website"))
+  expect(data.projects.at(-1).name).toBe("website")
+}, 30000)

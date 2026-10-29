@@ -6,7 +6,7 @@
   "files": [
     "index.mjs",
     "layerfs.mjs",
-    "page-data.mjs",
+    "page-service.mjs",
     "page",
     "README.md"
   ],
@@ -25,7 +25,8 @@
   "license": "MIT",
   "magpie": {
     "options": {
-      "exec": false
+      "exec": false,
+      "pagePort": 43717
     },
     "page": {
       "file": "page/index.html",

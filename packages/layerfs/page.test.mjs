@@ -19,28 +19,34 @@ test("the package declares the page magpie shows", () => {
   expect(p.file).toBe("page/index.html")
   expect(p.icon).toBe("page/icon.svg")
   expect(pkg.files).toContain("page")
-  for (const f of ["index.html", "app.js", "view.js", "style.css", "icon.svg"])
+  expect(pkg.files).toContain("page-service.mjs")
+  for (const f of ["index.html", "boot.js", "trajectory.html", "app.js", "view.js", "style.css", "icon.svg"])
     expect(existsSync(join(page, f))).toBe(true)
   const html = read("index.html")
   expect(html).toContain("_magpie/bridge.js") // the host serves the bridge beside every page
-  expect(html).toContain('src="trajectory.js"')
-  // the live file is the data channel again, but OUT of the install: the
-  // tools write it in the plugin's data folder and the installed page/
-  // is a link to that folder (page-data.mjs), so nothing here is written
-  // at runtime either. The script tag is what 0.8.0 shipped.
-  expect(html).toContain('<script src="trajectory-live.js"></script>')
-  // the page sandbox forbids inline scripts and any fetch; the data
-  // scripts are the bundled sample and the live recording beside it
+  // the installed page only jumps: it loads the bridge and the boot
+  // script, and nothing else — no data scripts, no inline scripts
+  expect(html).toContain('src="boot.js"')
+  expect(html).not.toContain('src="trajectory.js"')
+  expect(html).not.toContain('src="trajectory-live.js"')
   expect(html).not.toMatch(/<script>(?!\s*src)/)
+  // the shell the service composes carries the UI and two injection
+  // markers, and no scripts of its own
+  const shell = read("trajectory.html")
+  expect(shell).toContain('id="graph"')
+  expect(shell).toContain("<!-- layerfs:style -->")
+  expect(shell).toContain("<!-- layerfs:scripts -->")
+  expect(shell).not.toMatch(/<script/)
 })
 
 test("item 13: the page reads only what package.json declares — nothing — and reaches no network", () => {
   // the ecosystem's convention, as the usage page's test states it: the
   // set of magpie.read names in the page's scripts equals the declared
   // permissions, and no script has a way out of the frame. This page
-  // declares no permissions: its data is the bundled sample, because
-  // the bridge's reads are a fixed host list with no plugin-private
-  // entry (see the README's page section).
+  // declares no permissions: the installed page only navigates away
+  // (boot.js, via location.replace — the one network action a page
+  // like this has), and the served page reads its data from the DOM,
+  // never by fetch (see the README's page section).
   expect(pkg.magpie.permissions).toBeUndefined()
   const reads = new Set()
   for (const f of readdirSync(page).filter((f) => f.endsWith(".js"))) {
@@ -70,7 +76,7 @@ test("item 14: every locale the package declares page titles for has a full stri
 })
 
 test("item 16: the detail card marks its branch with a dot, and the picker is a menu, not a select", () => {
-  const html = read("index.html")
+  const html = read("trajectory.html")
   expect(html).not.toContain("<select")
   expect(html).toContain('id="projBtn"')
   expect(html).toContain('id="projList"')
@@ -168,7 +174,7 @@ test("branches name their agent by token, in that agent's colour", () => {
 })
 
 test("the page's stat tiles and speed seg are in the markup, magpie-style", () => {
-  const html = read("index.html")
+  const html = read("trajectory.html")
   expect(html).toContain('class="tiles"')
   for (const id of ["nCommits", "tBranches", "vCopies", "vStored", "tDedup", "vSaved"])
     expect(html).toContain(`id="${id}"`)

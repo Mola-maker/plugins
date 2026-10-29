@@ -9,12 +9,14 @@
 // counters count up along the same easing magpie itself uses
 // (--ease, cubic-bezier(.2,.8,.2,1)).
 //
-// The data is the trajectory bundled with the package (trajectory.js,
-// a labeled sample from the benchmark run). A magpie page cannot read
-// plugin-private data: the bridge's reads are a fixed host list
-// (usage:summary, providers:list), and the sandbox allows no fetch.
-// The live recording the tools keep lives in the store as
-// trajectory.json, next to the store's own data.
+// The data is the trajectory the host service embedded in this page
+// (<script type="application/json" id="data">): the service reads it
+// from the store on every request, so a reload is always current. A
+// page opened without the service — the bundled sample defining
+// globalThis.LayerfsTrajectory — still works from that global. A
+// magpie page cannot read plugin-private data: the bridge's reads are
+// a fixed host list (usage:summary, providers:list), and the sandbox
+// allows no fetch, so the service, not a file, is the channel.
 (async () => {
   const V = globalThis.LayerfsView;
   const $ = (id) => document.getElementById(id);
@@ -24,7 +26,12 @@
   const PULSE_MS = 650;
 
   let theme = { lang: "en", dark: matchMedia("(prefers-color-scheme: dark)").matches };
-  try { theme = (await magpie.ready) || theme; } catch { /* standalone preview */ }
+  // The service hands the language over as LayerfsTheme (the served
+  // page is outside magpie, so magpie.ready is not there to ask); a
+  // page still inside magpie asks magpie.ready as before.
+  const preset = globalThis.LayerfsTheme
+  if (preset && typeof preset.lang === "string" && preset.lang) theme.lang = preset.lang
+  else try { theme = (await magpie.ready) || theme; } catch { /* standalone preview */ }
   const lang = theme.lang || "en";
   const t = V.text(lang);
   document.querySelectorAll("[data-t]").forEach((e) => { e.textContent = t[e.dataset.t]; });
@@ -42,7 +49,13 @@
     (V.agentOf(branch) || {}).color ||
     (lane === 0 ? mainColor() : series()[(lane - 1) % series().length]);
 
-  const data = globalThis.LayerfsTrajectory;
+  // The embedded recording first; the bundled sample's global second.
+  const embedded = document.getElementById("data");
+  let data = null;
+  if (embedded) {
+    try { data = JSON.parse(embedded.textContent); } catch { /* a broken embed shows the empty state */ }
+  }
+  if (!data) data = globalThis.LayerfsTrajectory;
   const projects = (data && data.projects || []).filter((p) => p.branches.some((b) => b.commits.length));
   if (!projects.length) {
     $("stage").hidden = true; $("controls").hidden = true; $("stats").hidden = true; $("agents").hidden = true;
@@ -53,9 +66,8 @@
 
   // Agent activity: every recorded tool call, newest last, each naming
   // the calling agent, the tool, the project, the branch and when. The
-  // events arrive in the live trajectory (the tools keep them current
-  // after every mutating call); the bundled sample carries none, so the
-  // section hides itself there.
+  // events arrive in the service's embedded trajectory; with none
+  // recorded the table gives way to an empty note.
   {
     const events = (data.events || []).slice(-40);
     const section = $("agents"), rows = $("agentRows"), emptyMsg = $("agentsEmpty");
