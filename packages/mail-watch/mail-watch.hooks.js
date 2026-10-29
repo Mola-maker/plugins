@@ -30,6 +30,10 @@ let digestTimer = null
 // anything above 2^31-1 ms to 1 ms, so a long window is armed in capped
 // steps, never in one clamped delay (see armDigest).
 let digestStep = 0
+// a test-only cap on that step: 0 = no cap. It lets a test force an
+// early wake (a short step on a long window) and watch the still-ahead
+// re-arm, without waiting out the window. Production never sets it.
+let digestStepCapForTests = 0
 // the hours the armed timer was set for, and the latest options seen:
 // the fired digest mails with the newest options, not the arming one's
 let digestHours = 0
@@ -142,7 +146,7 @@ function scheduleDigest(o, to) {
 // window is armed in capped steps instead: on wake, a due time still
 // ahead re-arms for the remainder; only a due time reached sends.
 function armDigest(wait, cur) {
-  const step = Math.min(wait, 2 ** 31 - 1)
+  const step = Math.min(wait, 2 ** 31 - 1, digestStepCapForTests || Infinity)
   digestStep = step
   digestTimer = setTimeout(() => {
     digestTimer = null
@@ -164,12 +168,16 @@ function armDigest(wait, cur) {
 export function digestScheduleForTests() {
   return { at: digestAt, armed: digestTimer !== null, stepMs: digestStep }
 }
+export function setDigestStepCapForTests(ms) {
+  digestStepCapForTests = ms
+}
 export function resetDigestScheduleForTests() {
   if (digestTimer) clearTimeout(digestTimer)
   digestTimer = null
   digestAt = 0
   digestHours = 0
   digestStep = 0
+  digestStepCapForTests = 0
   latestDigest = null
 }
 

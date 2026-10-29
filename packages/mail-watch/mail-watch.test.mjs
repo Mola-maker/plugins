@@ -24,7 +24,7 @@ const watch = await import("./watch.js")
 const { fill, message, renderHtml, DEFAULT_HTML } = await import("./template.js")
 const { send, resolveSmtp, PRESETS } = await import("./smtp.js")
 const { readDigest, baselineDigest } = await import("./digest.js")
-const { onResponse, digestScheduleForTests, resetDigestScheduleForTests } = await import("./mail-watch.hooks.js")
+const { onResponse, digestScheduleForTests, resetDigestScheduleForTests, setDigestStepCapForTests } = await import("./mail-watch.hooks.js")
 
 // ---- the fake SMTP servers ---------------------------------------------
 // Two shapes, matching what the client speaks:
@@ -723,6 +723,14 @@ describe("hooks", () => {
       watch: { errors: false, quotaExhausted: false, quotaLow: false },
     }
     await onResponse(null, { options: o, success: true }) // baseline + arm, due persisted
+    // the due time the first exchange armed: every restart below must
+    // keep it, not arm a fresh window. Waiting on the mail alone cannot
+    // prove that — a fresh 1.8 s window fires inside the 15 s poll, so
+    // the mail arrives whether or not the due time survived. The
+    // assertions on `at` are what make this test fail when persistence
+    // is gone (a fresh arm moves `at` to now + hours).
+    const kept = digestScheduleForTests().at
+    expect(kept).toBeGreaterThan(Date.now())
     writeFileSync(usage, JSON.stringify({ session: "hhhhhhhh-8888", agent: "claude", provider: "p", model: "m", status: 200 }) + "\n")
     // the host restarts every 400 ms: the old module's timer is dropped
     // (resetDigestScheduleForTests stands in for the process ending) and
@@ -735,6 +743,8 @@ describe("hooks", () => {
       mod.resetDigestScheduleForTests()
       mod = await import(`./mail-watch.hooks.js?restart=${Date.now()}-${i}`)
       await mod.onResponse(null, { options: o, success: true })
+      // still the first exchange's due time, not a fresh window
+      expect(mod.digestScheduleForTests().at).toBe(kept)
     }
     // poll for the mail instead of sleeping a fixed span past the
     // original due time, so a loaded machine still passes.
@@ -749,6 +759,52 @@ describe("hooks", () => {
     writeFileSync(state, JSON.stringify(cleaned))
     writeFileSync(usage, "")
   }, 20000)
+
+  test("an early wake re-arms for the rest instead of sending", async () => {
+    // the still-ahead re-arm had no test of its own: a probe covered it,
+    // but a probe is not a test — removing the re-arm passed the suite.
+    // A test-only step cap forces early wakes on a long window: the
+    // timer fires every 50 ms, finds the due time still ahead, and
+    // re-arms instead of sending. A usage row is present, so a misfire
+    // would mail and this test would see it.
+    const port = await startSecure()
+    if (!port) return // no openssl on this machine
+    writeFileSync(usage, "")
+    const raw = JSON.parse(readFileSync(state, "utf8"))
+    delete raw.digestOffset
+    delete raw.digestAt
+    delete raw.digestHours
+    writeFileSync(state, JSON.stringify(raw))
+    const o = {
+      smtp: { host: "127.0.0.1", port, secure: true, insecure: true, from: "f@x.y" },
+      to: ["t@x.y"],
+      report: { hours: 1 },
+      watch: { errors: false, quotaExhausted: false, quotaLow: false },
+    }
+    setDigestStepCapForTests(50)
+    await onResponse(null, { options: o, success: true })
+    const s = digestScheduleForTests()
+    expect(s.armed).toBe(true)
+    expect(s.stepMs).toBe(50) // the cap, not the 1 h window
+    writeFileSync(usage, JSON.stringify({ session: "iiiiiiii-9999", agent: "claude", provider: "p", model: "m", status: 200 }) + "\n")
+    try {
+      // several early wakes pass; the due time never moves and no mail
+      // goes out before it.
+      await Bun.sleep(300)
+      expect(digestScheduleForTests().at).toBe(s.at)
+      expect(digestScheduleForTests().stepMs).toBe(50)
+      expect(got.commands).not.toContain("DATA")
+    } finally {
+      // the cap is module-global: a failure above must not leak it into
+      // the monthly test's step assertion.
+      resetDigestScheduleForTests()
+    }
+    const cleaned = JSON.parse(readFileSync(state, "utf8"))
+    delete cleaned.digestAt
+    delete cleaned.digestHours
+    writeFileSync(state, JSON.stringify(cleaned))
+    writeFileSync(usage, "")
+  })
 
   test("a monthly digest does not fire at once: the timer step is capped", async () => {
     const port = await startSecure()
