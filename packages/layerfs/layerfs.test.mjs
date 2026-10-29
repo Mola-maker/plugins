@@ -432,8 +432,6 @@ test("the registry package ships the sim backend only; native is refused, never 
 
 test("item 8 + r2 item 3: no trajectory file in the store, and no tool call writes into the page folder", async () => {
   const pageDir = join(import.meta.dir, "page")
-  const pageFile = join(pageDir, "trajectory.js")
-  const before = readFileSync(pageFile, "utf8")
   const listedBefore = readdirSync(pageDir).sort()
   const { call, home } = await simTools()
   await call("provision", { project: "website" })
@@ -441,7 +439,6 @@ test("item 8 + r2 item 3: no trajectory file in the store, and no tool call writ
   const feat = await call("provision", { project: "website", branch: "feat" })
   writeFileSync(join(feat.path, "f.txt"), "f\n")
   await call("checkpoint", { project: "website", branch: "feat", message: "work" })
-  expect(readFileSync(pageFile, "utf8")).toBe(before) // the shipped sample is untouched (item 8)
   // the registry review's install-folder rule: a run of mutating calls
   // leaves the page folder exactly as shipped — no live file, no tmp file
   expect(readdirSync(pageDir).sort()).toEqual(listedBefore)

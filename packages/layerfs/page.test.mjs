@@ -394,6 +394,9 @@ test("a reload restores the project, scroll and replay position from location.ha
   expect(app).toContain("location.reload()")
   expect(app).toContain("playing || !projList.hidden")
   expect(app).toContain("scrollTo")
+  // the assignment itself, not just the names: keeping the format call
+  // but dropping the write to location.hash must fail this test
+  expect(app).toMatch(/location\.hash = V\.formatViewHash/)
   // byte counts are whole again: the mid-count fractions are gone
   expect(V.bytes(3.164870684975676)).toBe("3 B")
   expect(V.bytes(1500)).toBe("1.5 KB")

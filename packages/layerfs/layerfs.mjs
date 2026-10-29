@@ -764,8 +764,9 @@ export class SimBackend {
   // of every call grew with the history, for a file the page cannot
   // read (its bridge serves a fixed host list) and nothing else did
   // (round-2 review, item 3). Removed in 0.7.1: no tool call creates
-  // or updates a trajectory.json anymore. The page keeps its bundled
-  // sample until the host can serve plugin data to a page.
+  // or updates a trajectory.json anymore. The page is served by the
+  // host with its data embedded (page-service.mjs); the bundled
+  // sample it once shipped is gone.
 
   async resolve(project, branch = "main", inner = "") {
     const headId = this.head(project, branch)
